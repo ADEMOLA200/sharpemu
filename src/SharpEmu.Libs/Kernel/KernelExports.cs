@@ -253,6 +253,32 @@ public static class KernelExports
     }
 
     [SysAbiExport(
+        Nid = "3kg7rT0NQIs",
+        ExportName = "scePthreadExit",
+        Target = Generation.Gen4 | Generation.Gen5,
+        LibraryName = "libKernel")]
+    public static int PthreadExit(CpuContext ctx)
+    {
+        var value = ctx[CpuRegister.Rdi];
+        GuestThreadExecution.RequestCurrentEntryExit("scePthreadExit", value);
+        ctx[CpuRegister.Rax] = value;
+        return (int)OrbisGen2Result.ORBIS_GEN2_OK;
+    }
+
+    [SysAbiExport(
+        Nid = "FJrT5LuUBAU",
+        ExportName = "pthread_exit",
+        Target = Generation.Gen4 | Generation.Gen5,
+        LibraryName = "libScePosix")]
+    public static int PosixPthreadExit(CpuContext ctx)
+    {
+        var value = ctx[CpuRegister.Rdi];
+        GuestThreadExecution.RequestCurrentEntryExit("pthread_exit", value);
+        ctx[CpuRegister.Rax] = value;
+        return (int)OrbisGen2Result.ORBIS_GEN2_OK;
+    }
+
+    [SysAbiExport(
         Nid = "onNY9Byn-W8",
         ExportName = "scePthreadJoin",
         Target = Generation.Gen4 | Generation.Gen5,

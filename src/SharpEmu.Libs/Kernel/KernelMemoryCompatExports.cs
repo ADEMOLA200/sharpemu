@@ -65,6 +65,7 @@ public static class KernelMemoryCompatExports
     private const uint HostPageExecuteWriteCopy = 0x80;
     private const uint HostPageGuard = 0x100;
     private const int Enomem = 12;
+    private const int Efault = 14;
     private const int Einval = 22;
     private const int Erange = 34;
     private const int Struncate = 80;
@@ -96,10 +97,14 @@ public static class KernelMemoryCompatExports
     private static readonly object _libcAllocGate = new();
     private static readonly object _memoryGate = new();
     private static readonly object _tlsGate = new();
+    private static readonly object _ioTraceGate = new();
+    private static readonly object _statCacheGate = new();
     private static readonly Dictionary<ulong, DirectAllocation> _directAllocations = new();
     private static readonly Dictionary<ulong, LibcHeapAllocation> _libcAllocations = new();
     private static readonly Dictionary<ulong, MappedRegion> _mappedRegions = new();
     private static readonly Dictionary<ulong, ulong> _tlsModuleBlocks = new();
+    private static readonly HashSet<string> _tracedStatResults = new(StringComparer.Ordinal);
+    private static readonly HashSet<string> _negativeStatCache = new(StringComparer.OrdinalIgnoreCase);
     private static long _nextFileDescriptor = 2;
     private static ulong _nextPhysicalAddress;
     private static ulong _nextVirtualAddress;
@@ -114,6 +119,8 @@ public static class KernelMemoryCompatExports
     private static int _hostMemoryWriteFallbackCount;
     private static int _hostMemoryReadFallbackCount;
     private static int _nullWcscpyRecoveryCount;
+    private static string? _cachedApp0Root;
+    private static string? _cachedDownload0Root;
 
     [StructLayout(LayoutKind.Sequential)]
     private struct MemoryBasicInformation
@@ -1236,6 +1243,12 @@ public static class KernelMemoryCompatExports
         var mode = ResolveOpenMode(flags, access);
         try
         {
+            if (IsMutatingOpen(flags) && IsReadOnlyGuestMutationPath(guestPath))
+            {
+                LogOpenTrace($"_open readonly path='{guestPath}' host='{hostPath}' flags=0x{flags:X8}");
+                return (int)OrbisGen2Result.ORBIS_GEN2_ERROR_PERMISSION_DENIED;
+            }
+
             var wantsDirectory = (flags & O_DIRECTORY) != 0;
             if (wantsDirectory || Directory.Exists(hostPath))
             {
@@ -1278,6 +1291,11 @@ public static class KernelMemoryCompatExports
             lock (_fdGate)
             {
                 _openFiles[fd] = stream;
+            }
+
+            if (IsMutatingOpen(flags))
+            {
+                InvalidateNegativeStatCacheForPathAndAncestors(guestPath);
             }
 
             LogOpenTrace($"_open file path='{guestPath}' host='{hostPath}' flags=0x{flags:X8} fd={fd}");
@@ -1334,11 +1352,30 @@ public static class KernelMemoryCompatExports
         }
 
         var hostPath = ResolveGuestPath(guestPath);
-        if (!TryWriteHostPathStat(ctx, statAddress, hostPath))
+        var statCacheKey = GetNegativeStatCacheKey(guestPath);
+        if (statCacheKey is not null && IsNegativeStatCached(statCacheKey))
         {
+            LogUniqueStatTrace(guestPath, hostPath, found: false);
             return (int)OrbisGen2Result.ORBIS_GEN2_ERROR_NOT_FOUND;
         }
 
+        if (!TryWriteHostPathStat(ctx, statAddress, hostPath))
+        {
+            if (statCacheKey is not null)
+            {
+                AddNegativeStatCache(statCacheKey);
+            }
+
+            LogUniqueStatTrace(guestPath, hostPath, found: false);
+            return (int)OrbisGen2Result.ORBIS_GEN2_ERROR_NOT_FOUND;
+        }
+
+        if (statCacheKey is not null)
+        {
+            RemoveNegativeStatCache(statCacheKey);
+        }
+
+        LogUniqueStatTrace(guestPath, hostPath, found: true);
         ctx[CpuRegister.Rax] = 0;
         return (int)OrbisGen2Result.ORBIS_GEN2_OK;
     }
@@ -1356,13 +1393,22 @@ public static class KernelMemoryCompatExports
         var sizesAddress = ctx[CpuRegister.Rcx];
         if (pathListAddress == 0 || count == 0 || sizesAddress == 0 || count > 1024)
         {
+            KernelRuntimeCompatExports.TrySetErrno(ctx, Einval);
             return (int)OrbisGen2Result.ORBIS_GEN2_ERROR_INVALID_ARGUMENT;
         }
 
         for (ulong i = 0; i < count; i++)
         {
+            if (idsAddress != 0 &&
+                !TryWriteUInt32Compat(ctx, idsAddress + (i * sizeof(uint)), uint.MaxValue))
+            {
+                KernelRuntimeCompatExports.TrySetErrno(ctx, Efault);
+                return (int)OrbisGen2Result.ORBIS_GEN2_ERROR_MEMORY_FAULT;
+            }
+
             if (!TryResolveAprFilepath(ctx, pathListAddress, i, out var guestPath))
             {
+                KernelRuntimeCompatExports.TrySetErrno(ctx, Efault);
                 return (int)OrbisGen2Result.ORBIS_GEN2_ERROR_MEMORY_FAULT;
             }
 
@@ -1370,6 +1416,7 @@ public static class KernelMemoryCompatExports
             if (!TryGetAprFileSize(hostPath, out var fileSize))
             {
                 LogIoTrace("apr_resolve", guestPath, $"host='{hostPath}' index={i} count={count} result=not_found");
+                KernelRuntimeCompatExports.TrySetErrno(ctx, 2);
                 return (int)OrbisGen2Result.ORBIS_GEN2_ERROR_NOT_FOUND;
             }
 
@@ -1379,11 +1426,13 @@ public static class KernelMemoryCompatExports
             if (idsAddress != 0 &&
                 !TryWriteUInt32Compat(ctx, idsAddress + (i * sizeof(uint)), fileId))
             {
+                KernelRuntimeCompatExports.TrySetErrno(ctx, Efault);
                 return (int)OrbisGen2Result.ORBIS_GEN2_ERROR_MEMORY_FAULT;
             }
 
             if (!TryWriteUInt64Compat(ctx, sizesAddress + (i * sizeof(ulong)), fileSize))
             {
+                KernelRuntimeCompatExports.TrySetErrno(ctx, Efault);
                 return (int)OrbisGen2Result.ORBIS_GEN2_ERROR_MEMORY_FAULT;
             }
         }
@@ -1413,6 +1462,170 @@ public static class KernelMemoryCompatExports
 
         ctx[CpuRegister.Rax] = 0;
         return (int)OrbisGen2Result.ORBIS_GEN2_OK;
+    }
+
+    [SysAbiExport(
+        Nid = "AUXVxWeJU-A",
+        ExportName = "sceKernelUnlink",
+        Target = Generation.Gen4 | Generation.Gen5,
+        LibraryName = "libKernel")]
+    public static int KernelUnlink(CpuContext ctx)
+    {
+        var pathAddress = ctx[CpuRegister.Rdi];
+        if (pathAddress == 0)
+        {
+            return (int)OrbisGen2Result.ORBIS_GEN2_ERROR_INVALID_ARGUMENT;
+        }
+
+        if (!TryReadNullTerminatedUtf8(ctx, pathAddress, MaxGuestStringLength, out var guestPath))
+        {
+            return (int)OrbisGen2Result.ORBIS_GEN2_ERROR_MEMORY_FAULT;
+        }
+
+        var hostPath = ResolveGuestPath(guestPath);
+        if (IsReadOnlyGuestMutationPath(guestPath))
+        {
+            LogOpenTrace($"unlink readonly path='{guestPath}' host='{hostPath}'");
+            return (int)OrbisGen2Result.ORBIS_GEN2_ERROR_PERMISSION_DENIED;
+        }
+
+        try
+        {
+            if (Directory.Exists(hostPath))
+            {
+                return (int)OrbisGen2Result.ORBIS_GEN2_ERROR_PERMISSION_DENIED;
+            }
+
+            if (!File.Exists(hostPath))
+            {
+                AddNegativeStatCacheForGuestPath(guestPath);
+                return (int)OrbisGen2Result.ORBIS_GEN2_ERROR_NOT_FOUND;
+            }
+
+            File.Delete(hostPath);
+            InvalidateNegativeStatCacheForPathAndAncestors(guestPath);
+            AddNegativeStatCacheForGuestPath(guestPath);
+            LogOpenTrace($"unlink path='{guestPath}' host='{hostPath}'");
+            ctx[CpuRegister.Rax] = 0;
+            return (int)OrbisGen2Result.ORBIS_GEN2_OK;
+        }
+        catch (UnauthorizedAccessException)
+        {
+            return (int)OrbisGen2Result.ORBIS_GEN2_ERROR_PERMISSION_DENIED;
+        }
+        catch (IOException)
+        {
+            return (int)OrbisGen2Result.ORBIS_GEN2_ERROR_BUSY;
+        }
+    }
+
+    [SysAbiExport(
+        Nid = "1-LFLmRFxxM",
+        ExportName = "sceKernelMkdir",
+        Target = Generation.Gen4 | Generation.Gen5,
+        LibraryName = "libKernel")]
+    public static int KernelMkdir(CpuContext ctx)
+    {
+        var pathAddress = ctx[CpuRegister.Rdi];
+        if (pathAddress == 0)
+        {
+            return (int)OrbisGen2Result.ORBIS_GEN2_ERROR_INVALID_ARGUMENT;
+        }
+
+        if (!TryReadNullTerminatedUtf8(ctx, pathAddress, MaxGuestStringLength, out var guestPath))
+        {
+            return (int)OrbisGen2Result.ORBIS_GEN2_ERROR_MEMORY_FAULT;
+        }
+
+        var hostPath = ResolveGuestPath(guestPath);
+        if (IsReadOnlyGuestMutationPath(guestPath))
+        {
+            LogOpenTrace($"mkdir readonly path='{guestPath}' host='{hostPath}'");
+            return (int)OrbisGen2Result.ORBIS_GEN2_ERROR_PERMISSION_DENIED;
+        }
+
+        try
+        {
+            if (File.Exists(hostPath) || Directory.Exists(hostPath))
+            {
+                return (int)OrbisGen2Result.ORBIS_GEN2_ERROR_ALREADY_EXISTS;
+            }
+
+            var parentDirectory = Path.GetDirectoryName(hostPath);
+            if (string.IsNullOrWhiteSpace(parentDirectory) || !Directory.Exists(parentDirectory))
+            {
+                return (int)OrbisGen2Result.ORBIS_GEN2_ERROR_NOT_FOUND;
+            }
+
+            Directory.CreateDirectory(hostPath);
+            if (!Directory.Exists(hostPath))
+            {
+                return (int)OrbisGen2Result.ORBIS_GEN2_ERROR_NOT_FOUND;
+            }
+
+            InvalidateNegativeStatCacheForPathAndAncestors(guestPath);
+            LogOpenTrace($"mkdir path='{guestPath}' host='{hostPath}'");
+            ctx[CpuRegister.Rax] = 0;
+            return (int)OrbisGen2Result.ORBIS_GEN2_OK;
+        }
+        catch (UnauthorizedAccessException)
+        {
+            return (int)OrbisGen2Result.ORBIS_GEN2_ERROR_PERMISSION_DENIED;
+        }
+        catch (IOException)
+        {
+            return (int)OrbisGen2Result.ORBIS_GEN2_ERROR_INVALID_ARGUMENT;
+        }
+    }
+
+    [SysAbiExport(
+        Nid = "naInUjYt3so",
+        ExportName = "sceKernelRmdir",
+        Target = Generation.Gen4 | Generation.Gen5,
+        LibraryName = "libKernel")]
+    public static int KernelRmdir(CpuContext ctx)
+    {
+        var pathAddress = ctx[CpuRegister.Rdi];
+        if (pathAddress == 0)
+        {
+            return (int)OrbisGen2Result.ORBIS_GEN2_ERROR_INVALID_ARGUMENT;
+        }
+
+        if (!TryReadNullTerminatedUtf8(ctx, pathAddress, MaxGuestStringLength, out var guestPath))
+        {
+            return (int)OrbisGen2Result.ORBIS_GEN2_ERROR_MEMORY_FAULT;
+        }
+
+        var hostPath = ResolveGuestPath(guestPath);
+        if (IsReadOnlyGuestMutationPath(guestPath))
+        {
+            LogOpenTrace($"rmdir readonly path='{guestPath}' host='{hostPath}'");
+            return (int)OrbisGen2Result.ORBIS_GEN2_ERROR_PERMISSION_DENIED;
+        }
+
+        try
+        {
+            if (!Directory.Exists(hostPath))
+            {
+                AddNegativeStatCacheForGuestPath(guestPath);
+                return (int)OrbisGen2Result.ORBIS_GEN2_ERROR_NOT_FOUND;
+            }
+
+            Directory.Delete(hostPath, recursive: false);
+            InvalidateNegativeStatCacheForPathAndAncestors(guestPath);
+            AddNegativeStatCacheForGuestPath(guestPath);
+            LogOpenTrace($"rmdir path='{guestPath}' host='{hostPath}'");
+            ctx[CpuRegister.Rax] = 0;
+            return (int)OrbisGen2Result.ORBIS_GEN2_OK;
+        }
+        catch (UnauthorizedAccessException)
+        {
+            return (int)OrbisGen2Result.ORBIS_GEN2_ERROR_PERMISSION_DENIED;
+        }
+        catch (IOException)
+        {
+            return (int)OrbisGen2Result.ORBIS_GEN2_ERROR_BUSY;
+        }
     }
 
     private static int KernelCloseCore(CpuContext ctx, int fd)
@@ -3798,57 +4011,72 @@ public static class KernelMemoryCompatExports
             return guestPath;
         }
 
-        var devlogAppRoot = ResolveDevlogAppRoot();
         if (guestPath.StartsWith("/devlog/app/", StringComparison.OrdinalIgnoreCase))
         {
             var relative = NormalizeMountRelativePath(guestPath["/devlog/app/".Length..]);
-            return Path.Combine(devlogAppRoot, relative);
+            return Path.Combine(ResolveDevlogAppRoot(), relative);
         }
 
         if (guestPath.StartsWith("devlog/app/", StringComparison.OrdinalIgnoreCase))
         {
             var relative = NormalizeMountRelativePath(guestPath["devlog/app/".Length..]);
-            return Path.Combine(devlogAppRoot, relative);
+            return Path.Combine(ResolveDevlogAppRoot(), relative);
         }
 
         if (string.Equals(guestPath, "/devlog/app", StringComparison.OrdinalIgnoreCase) ||
             string.Equals(guestPath, "devlog/app", StringComparison.OrdinalIgnoreCase))
         {
-            return devlogAppRoot;
+            return ResolveDevlogAppRoot();
         }
 
-        var temp0Root = ResolveTemp0Root();
         if (guestPath.StartsWith("/temp0/", StringComparison.OrdinalIgnoreCase))
         {
             var relative = NormalizeMountRelativePath(guestPath["/temp0/".Length..]);
-            return Path.Combine(temp0Root, relative);
+            return Path.Combine(ResolveTemp0Root(), relative);
         }
 
         if (string.Equals(guestPath, "/temp0", StringComparison.OrdinalIgnoreCase))
         {
-            return temp0Root;
+            return ResolveTemp0Root();
         }
 
-        var hostappRoot = ResolveHostappRoot();
+        if (guestPath.StartsWith("/download0/", StringComparison.OrdinalIgnoreCase))
+        {
+            var relative = NormalizeMountRelativePath(guestPath["/download0/".Length..]);
+            return Path.Combine(ResolveDownload0Root(), relative);
+        }
+
+        if (guestPath.StartsWith("download0/", StringComparison.OrdinalIgnoreCase))
+        {
+            var relative = NormalizeMountRelativePath(guestPath["download0/".Length..]);
+            return Path.Combine(ResolveDownload0Root(), relative);
+        }
+
+        if (string.Equals(guestPath, "/download0", StringComparison.OrdinalIgnoreCase) ||
+            string.Equals(guestPath, "download0", StringComparison.OrdinalIgnoreCase))
+        {
+            return ResolveDownload0Root();
+        }
+
         if (guestPath.StartsWith("/hostapp/", StringComparison.OrdinalIgnoreCase))
         {
             var relative = NormalizeMountRelativePath(guestPath["/hostapp/".Length..]);
-            return Path.Combine(hostappRoot, relative);
+            return Path.Combine(ResolveHostappRoot(), relative);
         }
 
         if (guestPath.StartsWith("hostapp/", StringComparison.OrdinalIgnoreCase))
         {
             var relative = NormalizeMountRelativePath(guestPath["hostapp/".Length..]);
-            return Path.Combine(hostappRoot, relative);
+            return Path.Combine(ResolveHostappRoot(), relative);
         }
 
         if (string.Equals(guestPath, "/hostapp", StringComparison.OrdinalIgnoreCase) ||
             string.Equals(guestPath, "hostapp", StringComparison.OrdinalIgnoreCase))
         {
-            return hostappRoot;
+            return ResolveHostappRoot();
         }
 
-        var app0Root = Environment.GetEnvironmentVariable("SHARPEMU_APP0_DIR");
+        var app0Root = ResolveApp0Root();
         if (!string.IsNullOrWhiteSpace(app0Root))
         {
             if (string.Equals(guestPath, "/app0", StringComparison.OrdinalIgnoreCase) ||
@@ -3879,6 +4107,24 @@ public static class KernelMemoryCompatExports
         }
 
         return guestPath;
+    }
+
+    private static string? ResolveApp0Root()
+    {
+        var cached = Volatile.Read(ref _cachedApp0Root);
+        if (!string.IsNullOrWhiteSpace(cached))
+        {
+            return cached;
+        }
+
+        var configured = Environment.GetEnvironmentVariable("SHARPEMU_APP0_DIR");
+        if (string.IsNullOrWhiteSpace(configured))
+        {
+            return null;
+        }
+
+        Interlocked.CompareExchange(ref _cachedApp0Root, configured, null);
+        return _cachedApp0Root;
     }
 
     private static string NormalizeMountRelativePath(string relativePath)
@@ -3931,6 +4177,32 @@ public static class KernelMemoryCompatExports
         return root;
     }
 
+    private static string ResolveDownload0Root()
+    {
+        var cached = Volatile.Read(ref _cachedDownload0Root);
+        if (!string.IsNullOrWhiteSpace(cached))
+        {
+            return cached;
+        }
+
+        const string download0VariableName = "SHARPEMU_DOWNLOAD0_DIR";
+        var configuredRoot = Environment.GetEnvironmentVariable(download0VariableName);
+        string root;
+        if (!string.IsNullOrWhiteSpace(configuredRoot))
+        {
+            root = Path.GetFullPath(configuredRoot);
+        }
+        else
+        {
+            root = Path.Combine(GetPerAppWritableRoot(), "download0");
+            Environment.SetEnvironmentVariable(download0VariableName, root);
+        }
+
+        Directory.CreateDirectory(root);
+        Interlocked.CompareExchange(ref _cachedDownload0Root, root, null);
+        return _cachedDownload0Root;
+    }
+
     private static string ResolveHostappRoot()
     {
         const string hostappVariableName = "SHARPEMU_HOSTAPP_DIR";
@@ -3948,6 +4220,22 @@ public static class KernelMemoryCompatExports
 
         Directory.CreateDirectory(root);
         return root;
+    }
+
+    private static string GetPerAppWritableRoot()
+    {
+        var app0Root = Environment.GetEnvironmentVariable("SHARPEMU_APP0_DIR");
+        var appName = string.IsNullOrWhiteSpace(app0Root)
+            ? "default"
+            : Path.GetFileName(Path.TrimEndingDirectorySeparator(app0Root));
+        if (string.IsNullOrWhiteSpace(appName))
+        {
+            appName = "default";
+        }
+
+        var invalidChars = Path.GetInvalidFileNameChars();
+        appName = new string(appName.Select(ch => invalidChars.Contains(ch) ? '_' : ch).ToArray());
+        return Path.Combine(Path.GetTempPath(), "SharpEmu", appName);
     }
 
     private static void EnsureOpenParentDirectoryExists(string guestPath, string hostPath, int flags)
@@ -3971,6 +4259,17 @@ public static class KernelMemoryCompatExports
         {
             Directory.CreateDirectory(parentDirectory);
         }
+    }
+
+    private static bool IsMutatingOpen(int flags) =>
+        (flags & (O_WRONLY | O_RDWR | O_CREAT | O_TRUNC | O_APPEND)) != 0;
+
+    private static bool IsReadOnlyGuestMutationPath(string guestPath)
+    {
+        var normalized = NormalizeGuestStatCachePath(guestPath);
+        return normalized is not null &&
+               (string.Equals(normalized, "/app0", StringComparison.OrdinalIgnoreCase) ||
+                normalized.StartsWith("/app0/", StringComparison.OrdinalIgnoreCase));
     }
 
     private static bool TryReadCString(CpuContext ctx, ulong address, ulong maxLength, out byte[] bytes)
@@ -4350,7 +4649,7 @@ public static class KernelMemoryCompatExports
         return true;
     }
 
-    private static bool TryReadUInt64Compat(CpuContext ctx, ulong address, out ulong value)
+    internal static bool TryReadUInt64Compat(CpuContext ctx, ulong address, out ulong value)
     {
         Span<byte> bytes = stackalloc byte[sizeof(ulong)];
         if (!TryReadCompat(ctx, address, bytes))
@@ -4397,7 +4696,7 @@ public static class KernelMemoryCompatExports
         return TryWriteCompat(ctx, address, bytes);
     }
 
-    private static bool TryWriteUInt64Compat(CpuContext ctx, ulong address, ulong value)
+    internal static bool TryWriteUInt64Compat(CpuContext ctx, ulong address, ulong value)
     {
         Span<byte> bytes = stackalloc byte[sizeof(ulong)];
         BinaryPrimitives.WriteUInt64LittleEndian(bytes, value);
@@ -5345,19 +5644,20 @@ public static class KernelMemoryCompatExports
         size = 0;
         try
         {
-            if (Directory.Exists(hostPath))
+            var fileInfo = new FileInfo(hostPath);
+            if (fileInfo.Exists)
             {
-                size = 65536;
+                var length = fileInfo.Length;
+                size = length < 0 ? 0UL : unchecked((ulong)length);
                 return true;
             }
 
-            if (!File.Exists(hostPath))
+            if (!new DirectoryInfo(hostPath).Exists)
             {
                 return false;
             }
 
-            var length = new FileInfo(hostPath).Length;
-            size = length < 0 ? 0UL : unchecked((ulong)length);
+            size = 65536;
             return true;
         }
         catch
@@ -5540,6 +5840,120 @@ public static class KernelMemoryCompatExports
         }
 
         Console.Error.WriteLine($"[LOADER][TRACE] {operation} path='{path}' {detail}");
+    }
+
+    private static void LogUniqueStatTrace(string guestPath, string hostPath, bool found)
+    {
+        if (!string.Equals(Environment.GetEnvironmentVariable("SHARPEMU_LOG_IO"), "1", StringComparison.Ordinal))
+        {
+            return;
+        }
+
+        var result = found ? "found" : "not_found";
+        lock (_ioTraceGate)
+        {
+            if (!_tracedStatResults.Add($"{result}\0{guestPath}"))
+            {
+                return;
+            }
+        }
+
+        LogIoTrace("stat", guestPath, $"host='{hostPath}' result={result}");
+    }
+
+    private static string? GetNegativeStatCacheKey(string guestPath)
+    {
+        var normalized = NormalizeGuestStatCachePath(guestPath);
+        return IsReadOnlyGuestStatPath(normalized) ? normalized : null;
+    }
+
+    private static string? NormalizeGuestStatCachePath(string guestPath)
+    {
+        var normalized = guestPath.Replace('\\', '/').TrimEnd('/');
+        if (normalized.Length == 0)
+        {
+            return null;
+        }
+
+        if (normalized[0] != '/')
+        {
+            normalized = "/" + normalized;
+        }
+
+        return normalized;
+    }
+
+    private static bool IsReadOnlyGuestStatPath(string? normalizedGuestPath) =>
+        normalizedGuestPath is not null &&
+        (string.Equals(normalizedGuestPath, "/app0", StringComparison.OrdinalIgnoreCase) ||
+         normalizedGuestPath.StartsWith("/app0/", StringComparison.OrdinalIgnoreCase) ||
+         string.Equals(normalizedGuestPath, "/hostapp", StringComparison.OrdinalIgnoreCase) ||
+         normalizedGuestPath.StartsWith("/hostapp/", StringComparison.OrdinalIgnoreCase) ||
+         string.Equals(normalizedGuestPath, "/devlog/app", StringComparison.OrdinalIgnoreCase) ||
+         normalizedGuestPath.StartsWith("/devlog/app/", StringComparison.OrdinalIgnoreCase) ||
+         string.Equals(normalizedGuestPath, "/temp0", StringComparison.OrdinalIgnoreCase) ||
+         normalizedGuestPath.StartsWith("/temp0/", StringComparison.OrdinalIgnoreCase) ||
+         string.Equals(normalizedGuestPath, "/download0", StringComparison.OrdinalIgnoreCase) ||
+         normalizedGuestPath.StartsWith("/download0/", StringComparison.OrdinalIgnoreCase));
+
+    private static bool IsNegativeStatCached(string cacheKey)
+    {
+        lock (_statCacheGate)
+        {
+            return _negativeStatCache.Contains(cacheKey);
+        }
+    }
+
+    private static void AddNegativeStatCache(string cacheKey)
+    {
+        lock (_statCacheGate)
+        {
+            _negativeStatCache.Add(cacheKey);
+        }
+    }
+
+    private static void RemoveNegativeStatCache(string cacheKey)
+    {
+        lock (_statCacheGate)
+        {
+            _negativeStatCache.Remove(cacheKey);
+        }
+    }
+
+    private static void AddNegativeStatCacheForGuestPath(string guestPath)
+    {
+        var cacheKey = GetNegativeStatCacheKey(guestPath);
+        if (cacheKey is not null)
+        {
+            AddNegativeStatCache(cacheKey);
+        }
+    }
+
+    private static void InvalidateNegativeStatCacheForPathAndAncestors(string guestPath)
+    {
+        var normalized = NormalizeGuestStatCachePath(guestPath);
+        if (normalized is null)
+        {
+            return;
+        }
+
+        lock (_statCacheGate)
+        {
+            var current = normalized;
+            while (true)
+            {
+                _negativeStatCache.Remove(current);
+                var slash = current.LastIndexOf('/');
+                if (slash <= 0)
+                {
+                    break;
+                }
+
+                current = current[..slash];
+            }
+
+            _negativeStatCache.Remove("/");
+        }
     }
 
     private static string PreviewIoBytes(byte[] buffer, int count, int maxBytes)

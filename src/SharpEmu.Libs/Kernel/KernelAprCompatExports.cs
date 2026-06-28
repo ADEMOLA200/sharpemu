@@ -11,8 +11,13 @@ namespace SharpEmu.Libs.Kernel;
 
 public static class KernelAprCompatExports
 {
-    private static readonly ConcurrentDictionary<uint, ulong> _submittedCommandBuffers = new();
+    private static readonly ConcurrentDictionary<uint, AprSubmission> _submittedCommandBuffers = new();
     private static int _nextSubmissionId;
+    private static int _aprWaitTraceCount;
+    private static readonly bool _traceApr =
+        string.Equals(Environment.GetEnvironmentVariable("SHARPEMU_LOG_AMPR"), "1", StringComparison.Ordinal);
+
+    private readonly record struct AprSubmission(ulong CommandBuffer, ulong Priority, ulong ResultAddress);
 
     [SysAbiExport(
         Nid = "ASoW5WE-UPo",
@@ -37,7 +42,7 @@ public static class KernelAprCompatExports
             submissionId = unchecked((uint)Interlocked.Increment(ref _nextSubmissionId));
         }
 
-        _submittedCommandBuffers[submissionId] = commandBuffer;
+        _submittedCommandBuffers[submissionId] = new AprSubmission(commandBuffer, priority, resultAddress);
 
         var completionResult = AmprExports.CompleteCommandBuffer(ctx, commandBuffer);
         if (completionResult != (int)OrbisGen2Result.ORBIS_GEN2_OK)
@@ -67,20 +72,23 @@ public static class KernelAprCompatExports
     public static int KernelAprWaitCommandBuffer(CpuContext ctx)
     {
         var submissionId = unchecked((uint)ctx[CpuRegister.Rdi]);
-        var priority = ctx[CpuRegister.Rsi];
-        var resultAddress = ctx[CpuRegister.Rdx];
+        var waitArg1 = ctx[CpuRegister.Rsi];
+        var waitArg2 = ctx[CpuRegister.Rdx];
 
-        if (!_submittedCommandBuffers.TryRemove(submissionId, out var commandBuffer))
+        if (!_submittedCommandBuffers.TryRemove(submissionId, out var submission))
         {
+            TraceAprWaitFailure(ctx, "wait_missing", submissionId, commandBuffer: 0, waitArg1, waitArg2);
             return (int)OrbisGen2Result.ORBIS_GEN2_ERROR_NOT_FOUND;
         }
 
+        var resultAddress = ResolveWaitResultAddress(waitArg1, waitArg2, submission.ResultAddress);
         if (resultAddress != 0 && !TryWriteAprResult(ctx, resultAddress))
         {
+            TraceAprWaitFailure(ctx, "wait_result_fault", submissionId, submission.CommandBuffer, waitArg1, waitArg2);
             return (int)OrbisGen2Result.ORBIS_GEN2_ERROR_MEMORY_FAULT;
         }
 
-        TraceApr(ctx, "wait", submissionId, commandBuffer, priority, resultAddress);
+        TraceApr(ctx, "wait", submissionId, submission.CommandBuffer, waitArg1, resultAddress);
         return (int)OrbisGen2Result.ORBIS_GEN2_OK;
     }
 
@@ -98,7 +106,7 @@ public static class KernelAprCompatExports
         }
 
         var submissionId = unchecked((uint)Interlocked.Increment(ref _nextSubmissionId));
-        _submittedCommandBuffers[submissionId] = commandBuffer;
+        _submittedCommandBuffers[submissionId] = new AprSubmission(commandBuffer, ctx[CpuRegister.Rsi], ResultAddress: 0);
 
         var completionResult = AmprExports.CompleteCommandBuffer(ctx, commandBuffer);
         if (completionResult != (int)OrbisGen2Result.ORBIS_GEN2_OK)
@@ -125,7 +133,7 @@ public static class KernelAprCompatExports
         }
 
         var submissionId = unchecked((uint)Interlocked.Increment(ref _nextSubmissionId));
-        _submittedCommandBuffers[submissionId] = commandBuffer;
+        _submittedCommandBuffers[submissionId] = new AprSubmission(commandBuffer, ctx[CpuRegister.Rsi], ResultAddress: 0);
 
         var completionResult = AmprExports.CompleteCommandBuffer(ctx, commandBuffer);
         if (completionResult != (int)OrbisGen2Result.ORBIS_GEN2_OK)
@@ -149,6 +157,27 @@ public static class KernelAprCompatExports
         return ctx.Memory.TryWrite(resultAddress, result);
     }
 
+    private static ulong ResolveWaitResultAddress(ulong waitArg1, ulong waitArg2, ulong submittedResultAddress)
+    {
+        if (waitArg2 == 0)
+        {
+            return submittedResultAddress;
+        }
+
+        if (IsAmprCompletionToken(waitArg1) && waitArg2 <= 0xFFFF)
+        {
+            return submittedResultAddress;
+        }
+
+        return waitArg2;
+    }
+
+    private static bool IsAmprCompletionToken(ulong value)
+    {
+        var tag = value >> 56;
+        return tag is 0x0C or 0x10;
+    }
+
     private static bool TryWriteUInt32(CpuContext ctx, ulong address, uint value)
     {
         Span<byte> buffer = stackalloc byte[sizeof(uint)];
@@ -164,7 +193,7 @@ public static class KernelAprCompatExports
         ulong priority,
         ulong aux)
     {
-        if (!string.Equals(Environment.GetEnvironmentVariable("SHARPEMU_LOG_AMPR"), "1", StringComparison.Ordinal))
+        if (!_traceApr)
         {
             return;
         }
@@ -180,5 +209,47 @@ public static class KernelAprCompatExports
             Console.Error.WriteLine(
                 $"[LOADER][TRACE] apr.{operation}.result: addr=0x{aux:X16} q0=0x{result0:X16} q1=0x{result1:X16}");
         }
+    }
+
+    private static void TraceAprWaitFailure(
+        CpuContext ctx,
+        string operation,
+        uint submissionId,
+        ulong commandBuffer,
+        ulong priority,
+        ulong resultAddress)
+    {
+        if (!_traceApr)
+        {
+            return;
+        }
+
+        var traceCount = Interlocked.Increment(ref _aprWaitTraceCount);
+        if (traceCount > 32 && (traceCount & 0x3FF) != 0)
+        {
+            return;
+        }
+
+        var returnRip = 0UL;
+        _ = ctx.TryReadUInt64(ctx[CpuRegister.Rsp], out returnRip);
+        Console.Error.WriteLine(
+            $"[LOADER][TRACE] apr.{operation}: id=0x{submissionId:X8} cmd=0x{commandBuffer:X16} " +
+            $"rsi=0x{priority:X16} rdx=0x{resultAddress:X16} rcx=0x{ctx[CpuRegister.Rcx]:X16} " +
+            $"r8=0x{ctx[CpuRegister.R8]:X16} r9=0x{ctx[CpuRegister.R9]:X16} ret=0x{returnRip:X16}");
+        TraceReadableQword(ctx, operation, "rsi", priority);
+        TraceReadableQword(ctx, operation, "rdx", resultAddress);
+        TraceReadableQword(ctx, operation, "rcx", ctx[CpuRegister.Rcx]);
+        TraceReadableQword(ctx, operation, "r8", ctx[CpuRegister.R8]);
+    }
+
+    private static void TraceReadableQword(CpuContext ctx, string operation, string name, ulong address)
+    {
+        if (address == 0 || !ctx.TryReadUInt64(address, out var value))
+        {
+            return;
+        }
+
+        Console.Error.WriteLine(
+            $"[LOADER][TRACE] apr.{operation}.{name}: addr=0x{address:X16} q0=0x{value:X16}");
     }
 }

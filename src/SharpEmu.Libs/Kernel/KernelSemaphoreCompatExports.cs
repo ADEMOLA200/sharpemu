@@ -120,7 +120,7 @@ public static class KernelSemaphoreCompatExports
                 return SetReturn(ctx, OrbisGen2Result.ORBIS_GEN2_ERROR_TIMED_OUT);
             }
 
-            if (!GuestThreadExecution.RequestCurrentThreadBlock("sceKernelWaitSema"))
+            if (!GuestThreadExecution.RequestCurrentThreadBlock(ctx, "sceKernelWaitSema"))
             {
                 TraceSemaphore($"wait-would-block handle=0x{handle:X8} name='{semaphore.Name}' need={needCount} count={semaphore.Count}");
                 return SetReturn(ctx, OrbisGen2Result.ORBIS_GEN2_ERROR_TRY_AGAIN);

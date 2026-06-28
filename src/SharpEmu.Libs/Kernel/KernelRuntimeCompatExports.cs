@@ -57,6 +57,13 @@ public static class KernelRuntimeCompatExports
     private static readonly (ulong Base, ulong Size)[] _prtApertures = new (ulong Base, ulong Size)[3];
     private static int _stackChkFailCount;
     private static long _usleepTraceCount;
+    private static readonly bool _traceUsleep =
+        string.Equals(Environment.GetEnvironmentVariable("SHARPEMU_LOG_USLEEP"), "1", StringComparison.Ordinal);
+    private static readonly bool _traceGuestThreads =
+        string.Equals(Environment.GetEnvironmentVariable("SHARPEMU_LOG_GUEST_THREADS"), "1", StringComparison.Ordinal);
+
+    [ThreadStatic]
+    private static int _shortUsleepCount;
 
     [UnmanagedFunctionPointer(CallingConvention.Cdecl)]
     private delegate ulong RdtscDelegate();
@@ -80,10 +87,20 @@ public static class KernelRuntimeCompatExports
 
         if (micros < 1000)
         {
-            Thread.Yield();
+            // Guest worker pools use usleep(1) as a polling backoff. Periodically
+            // relinquish a full host time slice so spin workers cannot starve producers.
+            if ((++_shortUsleepCount & 31) == 0)
+            {
+                Thread.Sleep(1);
+            }
+            else
+            {
+                Thread.Yield();
+            }
         }
         else
         {
+            _shortUsleepCount = 0;
             var sleepMilliseconds = (int)Math.Min((micros + 999UL) / 1000UL, int.MaxValue);
             Thread.Sleep(sleepMilliseconds);
         }
@@ -94,7 +111,7 @@ public static class KernelRuntimeCompatExports
 
     private static void TraceUsleepSpin(CpuContext ctx, ulong micros)
     {
-        if (!string.Equals(Environment.GetEnvironmentVariable("SHARPEMU_LOG_USLEEP"), "1", StringComparison.Ordinal))
+        if (!_traceUsleep)
         {
             return;
         }
@@ -142,6 +159,19 @@ public static class KernelRuntimeCompatExports
 
         Console.Error.WriteLine(
             $"[LOADER][TRACE] usleep#{count}: usec={micros} ret=0x{returnRip:X16} caller={callerReturnText} thread=0x{thread:X16} fiber=0x{fiber:X16} rbx=0x{rbx:X16} lock@+F78=0x{lockAddress:X16}:{lockText} r12=0x{r12:X16} scheduler@+8={schedulerText} r13=0x{r13:X16}:{waitValueText} r14=0x{ctx[CpuRegister.R14]:X16} r15=0x{ctx[CpuRegister.R15]:X16}");
+
+        if (count % 100000 == 0 &&
+            _traceGuestThreads &&
+            GuestThreadExecution.Scheduler is { } scheduler)
+        {
+            foreach (var snapshot in scheduler.SnapshotThreads())
+            {
+                Console.Error.WriteLine(
+                    $"[LOADER][TRACE] guest_thread.snapshot handle=0x{snapshot.ThreadHandle:X16} name='{snapshot.Name}' " +
+                    $"state={snapshot.State} imports={snapshot.ImportCount} nid={snapshot.LastImportNid ?? "none"} " +
+                    $"ret=0x{snapshot.LastReturnRip:X16} block={snapshot.BlockReason ?? "none"}");
+            }
+        }
     }
 
     [SysAbiExport(
@@ -581,17 +611,14 @@ public static class KernelRuntimeCompatExports
     public static int ErrorAddress(CpuContext ctx)
     {
         var address = GetTlsScratchAddress(ctx, TlsErrnoOffset);
-        if (address != 0)
-        {
-            Span<byte> zero = stackalloc byte[sizeof(int)];
-            if (!ctx.Memory.TryWrite(address, zero))
-            {
-                return (int)OrbisGen2Result.ORBIS_GEN2_ERROR_MEMORY_FAULT;
-            }
-        }
-
         ctx[CpuRegister.Rax] = address;
         return (int)OrbisGen2Result.ORBIS_GEN2_OK;
+    }
+
+    internal static bool TrySetErrno(CpuContext ctx, int value)
+    {
+        var address = GetTlsScratchAddress(ctx, TlsErrnoOffset);
+        return address != 0 && TryWriteInt32(ctx, address, value);
     }
 
     [SysAbiExport(
@@ -1505,17 +1532,20 @@ public static class KernelRuntimeCompatExports
             ulong.TryParse(overrideHzText, out var overrideHz) &&
             overrideHz >= minSane)
         {
+            TraceKernelTscFrequency("env", overrideHz);
             return overrideHz;
-        }
-
-        if (TryResolveCpuidTscFrequency(out ulong cpuidHz) && cpuidHz >= minSane)
-        {
-            return cpuidHz;
         }
 
         if (TryCalibrateHostTscFrequency(out ulong calibratedHz) && calibratedHz >= minSane)
         {
+            TraceKernelTscFrequency("calibrated-rdtsc", calibratedHz);
             return calibratedHz;
+        }
+
+        if (TryResolveCpuidTscFrequency(out ulong cpuidHz) && cpuidHz >= minSane)
+        {
+            TraceKernelTscFrequency("cpuid", cpuidHz);
+            return cpuidHz;
         }
 
         var hostQpc = Stopwatch.Frequency > 0
@@ -1523,10 +1553,17 @@ public static class KernelRuntimeCompatExports
             : DefaultKernelTscFrequency;
         if (hostQpc >= minSane)
         {
+            TraceKernelTscFrequency("qpc", hostQpc);
             return hostQpc;
         }
 
+        TraceKernelTscFrequency("default", DefaultKernelTscFrequency);
         return DefaultKernelTscFrequency;
+    }
+
+    private static void TraceKernelTscFrequency(string source, ulong frequencyHz)
+    {
+        Console.Error.WriteLine($"[LOADER][INFO] Kernel TSC frequency: {frequencyHz} Hz ({source})");
     }
 
     private static bool TryResolveCpuidTscFrequency(out ulong frequencyHz)
@@ -1788,7 +1825,7 @@ public static class KernelRuntimeCompatExports
             }
 
             var invokeArgs = allocateAtHasAllowAlternativeArg
-                ? new object[] { desiredAddress, length, false, false }
+                ? new object[] { desiredAddress, length, false, allowSearch }
                 : new object[] { desiredAddress, length, false };
             var result = allocateAt.Invoke(memoryObject, invokeArgs);
             if (result is not ulong allocated || allocated == 0)

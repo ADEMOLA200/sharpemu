@@ -1,6 +1,7 @@
 // Copyright (C) 2026 SharpEmu Emulator Project
 // SPDX-License-Identifier: GPL-2.0-or-later
 
+using System.Collections.Concurrent;
 using System.Runtime.InteropServices;
 using System.Threading;
 using SharpEmu.HLE;
@@ -11,8 +12,7 @@ internal static class KernelPthreadState
 {
     private const int ThreadObjectSize = 0x1000;
 
-    private static readonly object Gate = new();
-    private static readonly Dictionary<ulong, ThreadIdentity> Threads = new();
+    private static readonly ConcurrentDictionary<ulong, ThreadIdentity> Threads = new();
     private static readonly byte[] ZeroThreadObject = new byte[ThreadObjectSize];
     private static long _nextUniqueThreadId = 1;
 
@@ -56,10 +56,7 @@ internal static class KernelPthreadState
 
     internal static bool TryGetThreadIdentity(ulong threadHandle, out ThreadIdentity identity)
     {
-        lock (Gate)
-        {
-            return Threads.TryGetValue(threadHandle, out identity);
-        }
+        return Threads.TryGetValue(threadHandle, out identity);
     }
 
     private static void EnsureCurrentThreadRegistered()
@@ -81,10 +78,7 @@ internal static class KernelPthreadState
         Marshal.Copy(ZeroThreadObject, 0, pointer, ThreadObjectSize);
 
         var handle = unchecked((ulong)pointer.ToInt64());
-        lock (Gate)
-        {
-            Threads[handle] = new ThreadIdentity(uniqueId, string.IsNullOrWhiteSpace(name) ? $"Thread-{uniqueId:X}" : name);
-        }
+        Threads[handle] = new ThreadIdentity(uniqueId, string.IsNullOrWhiteSpace(name) ? $"Thread-{uniqueId:X}" : name);
 
         return handle;
     }

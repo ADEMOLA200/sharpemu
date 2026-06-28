@@ -1,6 +1,7 @@
 // Copyright (C) 2026 SharpEmu Emulator Project
 // SPDX-License-Identifier: GPL-2.0-or-later
 
+using System.Collections.Concurrent;
 using SharpEmu.HLE;
 using System.Buffers.Binary;
 using System.Threading;
@@ -10,7 +11,7 @@ namespace SharpEmu.Libs.Kernel;
 
 public static class KernelPthreadCompatExports
 {
-    private const int MutexTypeDefault = 1;
+    private const int MutexTypeDefault = 0;
     private const int MutexTypeErrorCheck = 1;
     private const int MutexTypeRecursive = 2;
     private const int MutexTypeNormal = 3;
@@ -25,11 +26,18 @@ public static class KernelPthreadCompatExports
     private const int PthreadOnceDone = 2;
 
     private static readonly object _stateGate = new();
-    private static readonly Dictionary<ulong, PthreadMutexState> _mutexStates = new();
+    private static readonly ConcurrentDictionary<ulong, PthreadMutexState> _mutexStates = new();
     private static readonly Dictionary<ulong, PthreadMutexAttrState> _mutexAttrStates = new();
     private static readonly Dictionary<ulong, PthreadCondState> _condStates = new();
     private static readonly Dictionary<ulong, object> _onceGates = new();
     private static readonly HashSet<ulong> _condAttrStates = new();
+    private static readonly bool _tracePthreads =
+        string.Equals(Environment.GetEnvironmentVariable("SHARPEMU_LOG_PTHREADS"), "1", StringComparison.Ordinal);
+    private static readonly bool _tracePthreadConds =
+        _tracePthreads ||
+        string.Equals(Environment.GetEnvironmentVariable("SHARPEMU_LOG_PTHREAD_CONDS"), "1", StringComparison.Ordinal);
+    private static readonly HashSet<ulong>? _tracePthreadMutexFilter = ParseTraceAddressFilter(
+        Environment.GetEnvironmentVariable("SHARPEMU_LOG_PTHREAD_MUTEX_FILTER"));
 
     private sealed class PthreadMutexState
     {
@@ -38,6 +46,12 @@ public static class KernelPthreadCompatExports
         public int RecursionCount { get; set; }
         public int Type { get; set; } = MutexTypeDefault;
         public int Protocol { get; set; }
+    }
+
+    private sealed class PthreadMutexWaiter
+    {
+        public required ulong ThreadId { get; init; }
+        public int Reserved;
     }
 
     private sealed class PthreadCondState
@@ -463,19 +477,13 @@ public static class KernelPthreadCompatExports
             return (int)OrbisGen2Result.ORBIS_GEN2_ERROR_MEMORY_FAULT;
         }
 
-        lock (_stateGate)
-        {
-            _mutexStates[mutexAddress] = state;
-            _mutexStates[handle] = state;
-        }
+        _mutexStates[mutexAddress] = state;
+        _mutexStates[handle] = state;
 
-        if (!ctx.TryWriteUInt64(mutexAddress, handle))
+        if (!KernelMemoryCompatExports.TryWriteUInt64Compat(ctx, mutexAddress, handle))
         {
-            lock (_stateGate)
-            {
-                _mutexStates.Remove(mutexAddress);
-                _mutexStates.Remove(handle);
-            }
+            _mutexStates.TryRemove(mutexAddress, out _);
+            _mutexStates.TryRemove(handle, out _);
 
             state.Semaphore.Dispose();
             return (int)OrbisGen2Result.ORBIS_GEN2_ERROR_MEMORY_FAULT;
@@ -492,15 +500,10 @@ public static class KernelPthreadCompatExports
         }
 
         var resolvedAddress = ResolveMutexHandle(ctx, mutexAddress);
-        PthreadMutexState? state;
-        lock (_stateGate)
+        _mutexStates.TryRemove(resolvedAddress, out var state);
+        if (resolvedAddress != mutexAddress)
         {
-            _mutexStates.TryGetValue(resolvedAddress, out state);
-            _mutexStates.Remove(resolvedAddress);
-            if (resolvedAddress != mutexAddress)
-            {
-                _mutexStates.Remove(mutexAddress);
-            }
+            _mutexStates.TryRemove(mutexAddress, out _);
         }
 
         if (state is null)
@@ -508,7 +511,7 @@ public static class KernelPthreadCompatExports
             return (int)OrbisGen2Result.ORBIS_GEN2_ERROR_NOT_FOUND;
         }
 
-        _ = ctx.TryWriteUInt64(mutexAddress, 0);
+        _ = KernelMemoryCompatExports.TryWriteUInt64Compat(ctx, mutexAddress, 0);
         state.Semaphore.Dispose();
         return (int)OrbisGen2Result.ORBIS_GEN2_OK;
     }
@@ -538,7 +541,7 @@ public static class KernelPthreadCompatExports
                     return (int)OrbisGen2Result.ORBIS_GEN2_OK;
                 }
 
-                if (state.Type is MutexTypeNormal or MutexTypeAdaptiveNp)
+                if (state.Type is MutexTypeDefault or MutexTypeNormal or MutexTypeAdaptiveNp)
                 {
                     if (tryOnly)
                     {
@@ -563,15 +566,33 @@ public static class KernelPthreadCompatExports
             }
         }
 
-        var acquired = true;
-        if (tryOnly)
+        var acquired = state.Semaphore.Wait(0);
+        if (!acquired)
         {
-            acquired = state.Semaphore.Wait(0);
+            // Guest-thread blocking for pthread_mutex_lock is currently disabled.
+            // Demon's Souls deadlocks during PS5SyncEvent initialization.
+            /* var waiter = new PthreadMutexWaiter { ThreadId = currentThreadId };
+            if (!tryOnly &&
+                GuestThreadExecution.IsGuestThread &&
+                GuestThreadExecution.TryGetCurrentImportCallFrame(out _) &&
+                GuestThreadExecution.RequestCurrentThreadBlock(
+                    ctx,
+                    "pthread_mutex_lock",
+                    GetMutexWakeKey(resolvedAddress),
+                    () => CompleteBlockedMutexLock(ctx, mutexAddress, resolvedAddress, state, waiter),
+                    () => TryReserveBlockedMutexLock(ctx, mutexAddress, resolvedAddress, state, waiter)))
+            {
+                TracePthreadMutex(ctx, "lock-block", mutexAddress, resolvedAddress, state, currentThreadId, (int)OrbisGen2Result.ORBIS_GEN2_OK);
+                return (int)OrbisGen2Result.ORBIS_GEN2_OK;
+            } */
+
+            if (!tryOnly)
+            {
+                state.Semaphore.Wait();
+                acquired = true;
+            }
         }
-        else
-        {
-            state.Semaphore.Wait();
-        }
+
         if (!acquired)
         {
             TracePthreadMutex(ctx, tryOnly ? "trylock" : "lock", mutexAddress, resolvedAddress, state, currentThreadId, (int)OrbisGen2Result.ORBIS_GEN2_ERROR_BUSY);
@@ -630,6 +651,7 @@ public static class KernelPthreadCompatExports
             try
             {
                 state.Semaphore.Release();
+                _ = GuestThreadExecution.Scheduler?.WakeBlockedThreads(GetMutexWakeKey(resolvedAddress), 1);
             }
             catch (SemaphoreFullException)
             {
@@ -666,7 +688,7 @@ public static class KernelPthreadCompatExports
             _mutexAttrStates[handle] = initialState;
         }
 
-        if (!ctx.TryWriteUInt64(attrAddress, handle))
+        if (!KernelMemoryCompatExports.TryWriteUInt64Compat(ctx, attrAddress, handle))
         {
             lock (_stateGate)
             {
@@ -765,22 +787,16 @@ public static class KernelPthreadCompatExports
             return 0;
         }
 
-        lock (_stateGate)
+        if (_mutexStates.ContainsKey(mutexAddress))
         {
-            if (_mutexStates.ContainsKey(mutexAddress))
-            {
-                return mutexAddress;
-            }
+            return mutexAddress;
         }
 
-        if (ctx.TryReadUInt64(mutexAddress, out var pointedHandle) && pointedHandle != 0)
+        if (KernelMemoryCompatExports.TryReadUInt64Compat(ctx, mutexAddress, out var pointedHandle) && pointedHandle != 0)
         {
-            lock (_stateGate)
+            if (_mutexStates.ContainsKey(pointedHandle))
             {
-                if (_mutexStates.ContainsKey(pointedHandle))
-                {
-                    return pointedHandle;
-                }
+                return pointedHandle;
             }
         }
 
@@ -796,16 +812,13 @@ public static class KernelPthreadCompatExports
             return false;
         }
 
-        lock (_stateGate)
+        if (_mutexStates.TryGetValue(mutexAddress, out state))
         {
-            if (_mutexStates.TryGetValue(mutexAddress, out state))
-            {
-                resolvedAddress = mutexAddress;
-                return true;
-            }
+            resolvedAddress = mutexAddress;
+            return true;
         }
 
-        if (!ctx.TryReadUInt64(mutexAddress, out var pointedHandle))
+        if (!KernelMemoryCompatExports.TryReadUInt64Compat(ctx, mutexAddress, out var pointedHandle))
         {
             return false;
         }
@@ -817,14 +830,11 @@ public static class KernelPthreadCompatExports
 
         if (pointedHandle != 0)
         {
-            lock (_stateGate)
+            if (_mutexStates.TryGetValue(pointedHandle, out state))
             {
-                if (_mutexStates.TryGetValue(pointedHandle, out state))
-                {
-                    _mutexStates[mutexAddress] = state;
-                    resolvedAddress = pointedHandle;
-                    return true;
-                }
+                _mutexStates.TryAdd(mutexAddress, state);
+                resolvedAddress = pointedHandle;
+                return true;
             }
 
             resolvedAddress = pointedHandle;
@@ -847,7 +857,7 @@ public static class KernelPthreadCompatExports
             return 0;
         }
 
-        if (ctx.TryReadUInt64(attrAddress, out var pointedHandle) && pointedHandle != 0)
+        if (KernelMemoryCompatExports.TryReadUInt64Compat(ctx, attrAddress, out var pointedHandle) && pointedHandle != 0)
         {
             lock (_stateGate)
             {
@@ -900,7 +910,7 @@ public static class KernelPthreadCompatExports
             }
         }
 
-        if (ctx.TryReadUInt64(condAddress, out var pointedHandle) && pointedHandle != 0)
+        if (KernelMemoryCompatExports.TryReadUInt64Compat(ctx, condAddress, out var pointedHandle) && pointedHandle != 0)
         {
             lock (_stateGate)
             {
@@ -932,7 +942,7 @@ public static class KernelPthreadCompatExports
             }
         }
 
-        if (ctx is null || !ctx.TryReadUInt64(condAddress, out var pointedHandle))
+        if (ctx is null || !KernelMemoryCompatExports.TryReadUInt64Compat(ctx, condAddress, out var pointedHandle))
         {
             return false;
         }
@@ -971,7 +981,7 @@ public static class KernelPthreadCompatExports
             _condStates[handle] = createdState;
         }
 
-        if (!ctx.TryWriteUInt64(condAddress, handle))
+        if (!KernelMemoryCompatExports.TryWriteUInt64Compat(ctx, condAddress, handle))
         {
             lock (_stateGate)
             {
@@ -1035,7 +1045,7 @@ public static class KernelPthreadCompatExports
             _condStates[handle] = state;
         }
 
-        if (!ctx.TryWriteUInt64(condAddress, handle))
+        if (!KernelMemoryCompatExports.TryWriteUInt64Compat(ctx, condAddress, handle))
         {
             lock (_stateGate)
             {
@@ -1066,7 +1076,7 @@ public static class KernelPthreadCompatExports
             }
         }
 
-        _ = ctx.TryWriteUInt64(condAddress, 0);
+        _ = KernelMemoryCompatExports.TryWriteUInt64Compat(ctx, condAddress, 0);
         return (int)OrbisGen2Result.ORBIS_GEN2_OK;
     }
 
@@ -1202,6 +1212,63 @@ public static class KernelPthreadCompatExports
         return (int)OrbisGen2Result.ORBIS_GEN2_OK;
     }
 
+    private static string GetMutexWakeKey(ulong resolvedMutexAddress) =>
+        $"pthread_mutex:0x{resolvedMutexAddress:X16}";
+
+    private static bool TryReserveBlockedMutexLock(
+        CpuContext ctx,
+        ulong mutexAddress,
+        ulong resolvedAddress,
+        PthreadMutexState state,
+        PthreadMutexWaiter waiter)
+    {
+        lock (state)
+        {
+            if (state.OwnerThreadId != 0 || state.RecursionCount != 0)
+            {
+                TracePthreadMutex(ctx, "lock-reserve-busy", mutexAddress, resolvedAddress, state, waiter.ThreadId, (int)OrbisGen2Result.ORBIS_GEN2_ERROR_BUSY);
+                return false;
+            }
+
+            state.OwnerThreadId = waiter.ThreadId;
+            state.RecursionCount = 1;
+            Interlocked.Exchange(ref waiter.Reserved, 1);
+        }
+
+        TracePthreadMutex(ctx, "lock-reserve", mutexAddress, resolvedAddress, state, waiter.ThreadId, (int)OrbisGen2Result.ORBIS_GEN2_OK);
+        return true;
+    }
+
+    private static int CompleteBlockedMutexLock(
+        CpuContext ctx,
+        ulong mutexAddress,
+        ulong resolvedAddress,
+        PthreadMutexState state,
+        PthreadMutexWaiter waiter)
+    {
+        var currentThreadId = KernelPthreadState.GetCurrentThreadHandle();
+        if (Interlocked.Exchange(ref waiter.Reserved, 0) == 1)
+        {
+            TracePthreadMutex(ctx, "lock-resume", mutexAddress, resolvedAddress, state, currentThreadId, (int)OrbisGen2Result.ORBIS_GEN2_OK);
+            return (int)OrbisGen2Result.ORBIS_GEN2_OK;
+        }
+
+        if (!state.Semaphore.Wait(0))
+        {
+            TracePthreadMutex(ctx, "lock-resume-busy", mutexAddress, resolvedAddress, state, currentThreadId, (int)OrbisGen2Result.ORBIS_GEN2_ERROR_BUSY);
+            return (int)OrbisGen2Result.ORBIS_GEN2_ERROR_BUSY;
+        }
+
+        lock (state)
+        {
+            state.OwnerThreadId = currentThreadId;
+            state.RecursionCount = 1;
+        }
+
+        TracePthreadMutex(ctx, "lock-resume", mutexAddress, resolvedAddress, state, currentThreadId, (int)OrbisGen2Result.ORBIS_GEN2_OK);
+        return (int)OrbisGen2Result.ORBIS_GEN2_OK;
+    }
+
     private static TimeSpan GetCondWaitTimeout(uint timeoutUsec)
     {
         if (timeoutUsec == 0)
@@ -1313,13 +1380,10 @@ public static class KernelPthreadCompatExports
             _mutexStates[handle] = createdState;
         }
 
-        if (!ctx.TryWriteUInt64(mutexAddress, handle))
+        if (!KernelMemoryCompatExports.TryWriteUInt64Compat(ctx, mutexAddress, handle))
         {
-            lock (_stateGate)
-            {
-                _mutexStates.Remove(mutexAddress);
-                _mutexStates.Remove(handle);
-            }
+            _mutexStates.TryRemove(mutexAddress, out _);
+            _mutexStates.TryRemove(handle, out _);
 
             resolvedAddress = 0;
             state = null;
@@ -1357,13 +1421,13 @@ public static class KernelPthreadCompatExports
 
     private static void TracePthreadMutex(CpuContext ctx, string operation, ulong mutexAddress, ulong resolvedAddress, PthreadMutexState? state, ulong currentThreadId, int result)
     {
-        if (!ShouldTracePthread())
+        if (!ShouldTracePthreadMutex(mutexAddress, resolvedAddress))
         {
             return;
         }
 
-        _ = ctx.TryReadUInt64(mutexAddress, out var guestWord0);
-        _ = ctx.TryReadUInt64(mutexAddress + 8, out var guestWord1);
+        _ = KernelMemoryCompatExports.TryReadUInt64Compat(ctx, mutexAddress, out var guestWord0);
+        _ = KernelMemoryCompatExports.TryReadUInt64Compat(ctx, mutexAddress + 8, out var guestWord1);
         Console.Error.WriteLine(
             $"[LOADER][TRACE] pthread_{operation}: mutex=0x{mutexAddress:X16} resolved=0x{resolvedAddress:X16} " +
             $"guest[0]=0x{guestWord0:X16} guest[8]=0x{guestWord1:X16} " +
@@ -1373,7 +1437,7 @@ public static class KernelPthreadCompatExports
 
     private static void TracePthreadCond(string operation, ulong condAddress, ulong mutexAddress, PthreadCondState? state, bool timed, int result)
     {
-        if (!ShouldTracePthread())
+        if (!_tracePthreadConds)
         {
             return;
         }
@@ -1385,6 +1449,45 @@ public static class KernelPthreadCompatExports
 
     private static bool ShouldTracePthread()
     {
-        return string.Equals(Environment.GetEnvironmentVariable("SHARPEMU_LOG_PTHREADS"), "1", StringComparison.Ordinal);
+        return _tracePthreads;
+    }
+
+    private static bool ShouldTracePthreadMutex(ulong mutexAddress, ulong resolvedAddress)
+    {
+        if (_tracePthreadMutexFilter is null || _tracePthreadMutexFilter.Count == 0)
+        {
+            return _tracePthreads;
+        }
+
+        return _tracePthreadMutexFilter.Contains(mutexAddress) ||
+            _tracePthreadMutexFilter.Contains(resolvedAddress);
+    }
+
+    private static HashSet<ulong>? ParseTraceAddressFilter(string? filter)
+    {
+        if (string.IsNullOrWhiteSpace(filter))
+        {
+            return null;
+        }
+
+        var addresses = new HashSet<ulong>();
+        foreach (var token in filter.Split(new[] { ',', ';', ' ' }, StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries))
+        {
+            var normalized = token.StartsWith("0x", StringComparison.OrdinalIgnoreCase)
+                ? token[2..]
+                : token;
+            normalized = normalized.TrimStart('0');
+
+            if (ulong.TryParse(
+                    normalized.Length == 0 ? "0" : normalized,
+                    System.Globalization.NumberStyles.HexNumber,
+                    System.Globalization.CultureInfo.InvariantCulture,
+                    out var address))
+            {
+                addresses.Add(address);
+            }
+        }
+
+        return addresses.Count == 0 ? null : addresses;
     }
 }

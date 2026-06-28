@@ -3,6 +3,7 @@
 
 using SharpEmu.HLE;
 using System.Buffers.Binary;
+using System.Collections.Concurrent;
 using System.Text;
 using System.Threading;
 using System.Diagnostics.CodeAnalysis;
@@ -26,12 +27,12 @@ public static class KernelPthreadExtendedCompatExports
     private static readonly Dictionary<ulong, ThreadState> _threadStates = new();
     private static readonly Dictionary<ulong, PthreadAttrState> _attrStates = new();
     private static readonly Dictionary<ulong, PthreadRwlockState> _rwlockStates = new();
-    private static readonly Dictionary<int, TlsKeyState> _tlsKeys = new();
+    private static readonly ConcurrentDictionary<int, TlsKeyState> _tlsKeys = new();
     private static int _nextTlsKey = 1;
     private static long _nextSyntheticRwlockHandleId = 1;
     private static long _nextSyntheticPthreadAttrHandleId = 1;
 
-    private static readonly Dictionary<ulong, Dictionary<int, ulong>> _threadLocalSpecific = new();
+    private static readonly ConcurrentDictionary<ulong, ConcurrentDictionary<int, ulong>> _threadLocalSpecific = new();
 
     private sealed class ThreadState
     {
@@ -793,7 +794,7 @@ public static class KernelPthreadExtendedCompatExports
             _rwlockStates[syntheticHandle] = rwlock;
         }
 
-        _ = ctx.TryWriteUInt64(rwlockAddress, syntheticHandle);
+        _ = KernelMemoryCompatExports.TryWriteUInt64Compat(ctx, rwlockAddress, syntheticHandle);
         ctx[CpuRegister.Rax] = 0;
         return (int)OrbisGen2Result.ORBIS_GEN2_OK;
     }
@@ -847,7 +848,7 @@ public static class KernelPthreadExtendedCompatExports
             }
         }
 
-        _ = ctx.TryWriteUInt64(rwlockAddress, 0);
+        _ = KernelMemoryCompatExports.TryWriteUInt64Compat(ctx, rwlockAddress, 0);
         ctx[CpuRegister.Rax] = 0;
         return (int)OrbisGen2Result.ORBIS_GEN2_OK;
     }
@@ -959,15 +960,13 @@ public static class KernelPthreadExtendedCompatExports
         }
 
         int key;
-        lock (_stateGate)
+        while (true)
         {
-            while (_tlsKeys.ContainsKey(_nextTlsKey))
+            key = Interlocked.Increment(ref _nextTlsKey) - 1;
+            if (_tlsKeys.TryAdd(key, new TlsKeyState(destructor)))
             {
-                _nextTlsKey++;
+                break;
             }
-
-            key = _nextTlsKey++;
-            _tlsKeys[key] = new TlsKeyState(destructor);
         }
 
         if (!TryWriteInt32(ctx, outKeyAddress, key))
@@ -994,17 +993,14 @@ public static class KernelPthreadExtendedCompatExports
     public static int PosixPthreadKeyDelete(CpuContext ctx)
     {
         var key = unchecked((int)ctx[CpuRegister.Rdi]);
-        lock (_stateGate)
+        if (!_tlsKeys.TryRemove(key, out _))
         {
-            if (!_tlsKeys.Remove(key))
-            {
-                return (int)OrbisGen2Result.ORBIS_GEN2_ERROR_NOT_FOUND;
-            }
+            return (int)OrbisGen2Result.ORBIS_GEN2_ERROR_NOT_FOUND;
+        }
 
-            foreach (var entry in _threadLocalSpecific)
-            {
-                entry.Value.Remove(key);
-            }
+        foreach (var values in _threadLocalSpecific.Values)
+        {
+            values.TryRemove(key, out _);
         }
 
         ctx[CpuRegister.Rax] = 0;
@@ -1028,22 +1024,15 @@ public static class KernelPthreadExtendedCompatExports
         var key = unchecked((int)ctx[CpuRegister.Rdi]);
         var value = ctx[CpuRegister.Rsi];
         var currentThreadHandle = KernelPthreadState.GetCurrentThreadHandle();
-        lock (_stateGate)
+        if (!_tlsKeys.ContainsKey(key))
         {
-            if (!_tlsKeys.TryGetValue(key, out _))
-            {
-                return (int)OrbisGen2Result.ORBIS_GEN2_ERROR_NOT_FOUND;
-            }
-
-            if (!_threadLocalSpecific.TryGetValue(currentThreadHandle, out var values))
-            {
-                values = new Dictionary<int, ulong>();
-                _threadLocalSpecific[currentThreadHandle] = values;
-            }
-
-            values[key] = value;
+            return (int)OrbisGen2Result.ORBIS_GEN2_ERROR_NOT_FOUND;
         }
 
+        var values = _threadLocalSpecific.GetOrAdd(
+            currentThreadHandle,
+            static _ => new ConcurrentDictionary<int, ulong>());
+        values[key] = value;
         ctx[CpuRegister.Rax] = 0;
         return (int)OrbisGen2Result.ORBIS_GEN2_OK;
     }
@@ -1065,19 +1054,16 @@ public static class KernelPthreadExtendedCompatExports
         var key = unchecked((int)ctx[CpuRegister.Rdi]);
         var currentThreadHandle = KernelPthreadState.GetCurrentThreadHandle();
         ulong value = 0;
-        lock (_stateGate)
+        if (!_tlsKeys.ContainsKey(key))
         {
-            if (!_tlsKeys.TryGetValue(key, out _))
-            {
-                ctx[CpuRegister.Rax] = 0;
-                return (int)OrbisGen2Result.ORBIS_GEN2_OK;
-            }
+            ctx[CpuRegister.Rax] = 0;
+            return (int)OrbisGen2Result.ORBIS_GEN2_OK;
+        }
 
-            if (_threadLocalSpecific.TryGetValue(currentThreadHandle, out var values) &&
-                values.TryGetValue(key, out var storedValue))
-            {
-                value = storedValue;
-            }
+        if (_threadLocalSpecific.TryGetValue(currentThreadHandle, out var values) &&
+            values.TryGetValue(key, out var storedValue))
+        {
+            value = storedValue;
         }
 
         ctx[CpuRegister.Rax] = value;
@@ -1163,7 +1149,7 @@ public static class KernelPthreadExtendedCompatExports
             }
         }
 
-        if (ctx.TryReadUInt64(rwlockAddress, out var pointedHandle) && pointedHandle != 0)
+        if (KernelMemoryCompatExports.TryReadUInt64Compat(ctx, rwlockAddress, out var pointedHandle) && pointedHandle != 0)
         {
             lock (_stateGate)
             {
@@ -1195,7 +1181,7 @@ public static class KernelPthreadExtendedCompatExports
             }
         }
 
-        if (!ctx.TryReadUInt64(rwlockAddress, out var pointedHandle))
+        if (!KernelMemoryCompatExports.TryReadUInt64Compat(ctx, rwlockAddress, out var pointedHandle))
         {
             return false;
         }
@@ -1230,7 +1216,7 @@ public static class KernelPthreadExtendedCompatExports
             _rwlockStates[syntheticHandle] = createdRwlock;
         }
 
-        _ = ctx.TryWriteUInt64(rwlockAddress, syntheticHandle);
+        _ = KernelMemoryCompatExports.TryWriteUInt64Compat(ctx, rwlockAddress, syntheticHandle);
         resolvedAddress = syntheticHandle;
         rwlock = createdRwlock;
         return true;

@@ -127,6 +127,7 @@ public static class KernelEventFlagCompatExports
             TraceEventFlag($"set handle=0x{handle:X16} pattern=0x{pattern:X16} bits=0x{state.Bits:X16} ret=0x{returnRip:X16}");
         }
 
+        _ = GuestThreadExecution.Scheduler?.WakeBlockedThreads(GetEventFlagWakeKey(handle));
         return SetReturn(ctx, OrbisGen2Result.ORBIS_GEN2_OK);
     }
 
@@ -226,7 +227,7 @@ public static class KernelEventFlagCompatExports
         Monitor.Enter(state.Gate);
         try
         {
-            if (TryCompleteSatisfiedWait(ctx, state, pattern, waitMode, out var immediateWaitResult))
+            if (TryCompleteSatisfiedWait(ctx, state, pattern, waitMode, resultAddress, out var immediateWaitResult))
             {
                 return SetReturn(ctx, immediateWaitResult);
             }
@@ -242,7 +243,28 @@ public static class KernelEventFlagCompatExports
             var currentGuestThread = GuestThreadExecution.CurrentGuestThreadHandle;
             var currentFiber = FiberExports.GetCurrentFiberAddressForDiagnostics(ctx);
             var managedThread = Environment.CurrentManagedThreadId;
-            var requestedBlock = GuestThreadExecution.RequestCurrentThreadBlock("sceKernelWaitEventFlag");
+            var blockedWaitResult = OrbisGen2Result.ORBIS_GEN2_OK;
+            var requestedBlock = GuestThreadExecution.RequestCurrentThreadBlock(
+                ctx,
+                "sceKernelWaitEventFlag",
+                GetEventFlagWakeKey(handle),
+                () => (int)blockedWaitResult,
+                () =>
+                {
+                    if (!TryPrepareBlockedWait(
+                            ctx,
+                            state,
+                            pattern,
+                            waitMode,
+                            resultAddress,
+                            out var preparedResult))
+                    {
+                        return false;
+                    }
+
+                    blockedWaitResult = preparedResult;
+                    return true;
+                });
             TraceEventFlag($"wait-unsatisfied handle=0x{handle:X16} pattern=0x{pattern:X16} bits=0x{state.Bits:X16} guest_thread=0x{currentGuestThread:X16} fiber=0x{currentFiber:X16} managed={managedThread} block={requestedBlock} ret=0x{returnRip:X16} frames={FormatFrameChain(ctx)}");
             TraceEventFlag($"wait-object handle=0x{handle:X16} name='{state.Name}' {FormatGuestWaitObject(ctx)}");
             if (!requestedBlock)
@@ -270,7 +292,7 @@ public static class KernelEventFlagCompatExports
                             Monitor.Enter(state.Gate);
                         }
 
-                        if (TryCompleteSatisfiedWait(ctx, state, pattern, waitMode, out var pumpedWaitResult))
+                        if (TryCompleteSatisfiedWait(ctx, state, pattern, waitMode, resultAddress, out var pumpedWaitResult))
                         {
                             state.WaitingThreads = Math.Max(0, state.WaitingThreads - 1);
                             releaseWaiter = false;
@@ -369,19 +391,21 @@ public static class KernelEventFlagCompatExports
     }
 
     private static bool TryCompleteSatisfiedWait(
-        CpuContext ctx,
-        EventFlagState state,
-        ulong pattern,
-        uint waitMode,
-        out OrbisGen2Result result)
+    CpuContext ctx,
+    EventFlagState state,
+    ulong pattern,
+    uint waitMode,
+    ulong resultAddress,
+    out OrbisGen2Result result)
     {
         result = OrbisGen2Result.ORBIS_GEN2_OK;
+
         if (!IsSatisfied(state.Bits, pattern, waitMode))
         {
             return false;
         }
 
-        if (!TryWriteResultPattern(ctx, ctx[CpuRegister.Rcx], state.Bits))
+        if (!TryWriteResultPattern(ctx, resultAddress, state.Bits))
         {
             result = OrbisGen2Result.ORBIS_GEN2_ERROR_MEMORY_FAULT;
             return true;
@@ -390,6 +414,41 @@ public static class KernelEventFlagCompatExports
         ApplyClearMode(state, pattern, waitMode);
         return true;
     }
+
+    private static bool TryPrepareBlockedWait(
+        CpuContext ctx,
+        EventFlagState state,
+        ulong pattern,
+        uint waitMode,
+        ulong resultAddress,
+        out OrbisGen2Result result)
+    {
+        lock (state.Gate)
+        {
+            result = OrbisGen2Result.ORBIS_GEN2_OK;
+            if (!IsSatisfied(state.Bits, pattern, waitMode))
+            {
+                return false;
+            }
+
+            if (!TryWriteResultPattern(ctx, resultAddress, state.Bits))
+            {
+                result = OrbisGen2Result.ORBIS_GEN2_ERROR_MEMORY_FAULT;
+            }
+            else
+            {
+                ApplyClearMode(state, pattern, waitMode);
+            }
+
+            state.WaitingThreads = Math.Max(0, state.WaitingThreads - 1);
+            TraceEventFlag(
+                $"wait-wake pattern=0x{pattern:X16} mode=0x{waitMode:X2} bits=0x{state.Bits:X16} waiters={state.WaitingThreads}");
+            return true;
+        }
+    }
+
+    private static string GetEventFlagWakeKey(ulong handle) =>
+        $"event_flag:0x{handle:X16}";
 
     private static bool TryWriteResultPattern(CpuContext ctx, ulong address, ulong bits) =>
         address == 0 || ctx.TryWriteUInt64(address, bits);
