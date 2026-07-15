@@ -67,7 +67,10 @@ SPDX-License-Identifier: GPL-2.0-or-later
           CopyToPublishDirectory="PreserveNewest" />
   </ItemGroup>
 
-  <Target Name="BuildNativeGuestGpu" BeforeTargets="Build" Condition="'$(NativeGpuLibrary)' != ''">
+  <!-- Native outputs must exist before MSBuild evaluates/copies Content items.
+       Hooking Build is too late on a clean checkout: CopyFilesToOutputDirectory
+       runs first and fails because the library has not been produced yet. -->
+  <Target Name="BuildNativeGuestGpu" BeforeTargets="PrepareForBuild" Condition="'$(NativeGpuLibrary)' != ''">
     <Exec Command="cmake -S &quot;$(NativeGpuProjectDir)&quot; -B &quot;$(NativeGpuBuildDir)&quot; -DCMAKE_BUILD_TYPE=$(Configuration) -DBUILD_TESTING=OFF" />
     <Exec Command="cmake --build &quot;$(NativeGpuBuildDir)&quot; --config $(Configuration)" />
     <Copy SourceFiles="$(NativeGpuLibrary)" DestinationFolder="$(TargetDir)" SkipUnchangedFiles="true" />
