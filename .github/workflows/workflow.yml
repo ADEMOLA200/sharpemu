@@ -195,7 +195,13 @@ jobs:
         if: matrix.rid == 'linux-x64'
         run: |
           sudo apt-get update
-          sudo apt-get install --yes libvulkan-dev pkg-config
+          sudo apt-get install --yes \
+            autoconf \
+            autoconf-archive \
+            automake \
+            libtool \
+            libvulkan-dev \
+            pkg-config
           "$VCPKG_INSTALLATION_ROOT/vcpkg" install sdl3:x64-linux
           cmake \
             -S src/SharpEmu.Gpu.Vulkan.Native \
