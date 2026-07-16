@@ -12,6 +12,9 @@ namespace SharpEmu.Libs.Gpu.NativeVulkan;
 /// <summary>Native C++ Vulkan implementation of the guest-domain GPU seam.</summary>
 internal sealed unsafe class NativeVulkanGuestGpuBackend : IGuestGpuBackend
 {
+    private static readonly IGuestCompiledShader DepthOnlyFragmentShader =
+        new VulkanCompiledGuestShader(SpirvFixedShaders.CreateDepthOnlyFragment());
+
     private readonly object _startGate = new();
     private readonly BlockingCollection<Action<nint>> _commands = new(new ConcurrentQueue<Action<nint>>(), 256);
     private readonly ManualResetEventSlim _ready = new(false);
@@ -48,33 +51,42 @@ internal sealed unsafe class NativeVulkanGuestGpuBackend : IGuestGpuBackend
 
     public bool TryCompileVertexShader(Gen5ShaderState state, Gen5ShaderEvaluation evaluation,
         out IGuestCompiledShader? shader, out string error, int globalBufferBase = 0,
-        int totalGlobalBufferCount = -1, int imageBindingBase = 0, int scalarRegisterBufferIndex = -1)
+        int totalGlobalBufferCount = -1, int imageBindingBase = 0, int scalarRegisterBufferIndex = -1,
+        int requiredVertexOutputCount = 0, ulong storageBufferOffsetAlignment = 1)
     {
         shader = null;
         if (!Gen5SpirvTranslator.TryCompileVertexShader(state, evaluation, out var compiled, out error,
-                globalBufferBase, totalGlobalBufferCount, imageBindingBase, scalarRegisterBufferIndex)) return false;
+                globalBufferBase, totalGlobalBufferCount, imageBindingBase, scalarRegisterBufferIndex,
+                requiredVertexOutputCount, storageBufferOffsetAlignment)) return false;
         shader = new VulkanCompiledGuestShader(compiled.Spirv); return true;
     }
 
     public bool TryCompilePixelShader(Gen5ShaderState state, Gen5ShaderEvaluation evaluation,
         IReadOnlyList<Gen5PixelOutputBinding> outputs, out IGuestCompiledShader? shader, out string error,
         int globalBufferBase = 0, int totalGlobalBufferCount = -1, int imageBindingBase = 0,
-        int scalarRegisterBufferIndex = -1)
+        int scalarRegisterBufferIndex = -1, uint pixelInputEnable = 0, uint pixelInputAddress = 0,
+        ulong storageBufferOffsetAlignment = 1)
     {
         shader = null;
         if (!Gen5SpirvTranslator.TryCompilePixelShader(state, evaluation, outputs, out var compiled, out error,
-                globalBufferBase, totalGlobalBufferCount, imageBindingBase, scalarRegisterBufferIndex)) return false;
+                globalBufferBase, totalGlobalBufferCount, imageBindingBase, scalarRegisterBufferIndex,
+                pixelInputEnable, pixelInputAddress, storageBufferOffsetAlignment)) return false;
         shader = new VulkanCompiledGuestShader(compiled.Spirv); return true;
     }
 
     public bool TryCompileComputeShader(Gen5ShaderState state, Gen5ShaderEvaluation evaluation,
-        uint localSizeX, uint localSizeY, uint localSizeZ, out IGuestCompiledShader? shader, out string error)
+        uint localSizeX, uint localSizeY, uint localSizeZ, out IGuestCompiledShader? shader, out string error,
+        int totalGlobalBufferCount = -1, int initialScalarBufferIndex = -1, uint waveLaneCount = 32,
+        ulong storageBufferOffsetAlignment = 1)
     {
         shader = null;
         if (!Gen5SpirvTranslator.TryCompileComputeShader(state, evaluation, localSizeX, localSizeY, localSizeZ,
-                out var compiled, out error)) return false;
+                out var compiled, out error, totalGlobalBufferCount, initialScalarBufferIndex, waveLaneCount,
+                storageBufferOffsetAlignment)) return false;
         shader = new VulkanCompiledGuestShader(compiled.Spirv); return true;
     }
+
+    public IGuestCompiledShader GetDepthOnlyFragmentShader() => DepthOnlyFragmentShader;
 
     public void HideSplashScreen() { }
 
@@ -118,7 +130,7 @@ internal sealed unsafe class NativeVulkanGuestGpuBackend : IGuestGpuBackend
         uint attributeCount, IReadOnlyList<GuestRenderTarget> targets, IGuestCompiledShader? vertexShader = null,
         uint vertexCount = 3, uint instanceCount = 1, uint primitiveType = 4,
         GuestIndexBuffer? indexBuffer = null, IReadOnlyList<GuestVertexBuffer>? vertexBuffers = null,
-        GuestRenderState? renderState = null)
+        GuestRenderState? renderState = null, GuestDepthTarget? depthTarget = null, ulong shaderAddress = 0)
     {
         if (targets.Count == 0) return;
         EnsureStarted(targets[0].Width, targets[0].Height);
@@ -130,9 +142,25 @@ internal sealed unsafe class NativeVulkanGuestGpuBackend : IGuestGpuBackend
             primitiveType, indexBuffer, vertexCopy, renderState, targetCopy, true)));
     }
 
+    public void SubmitDepthOnlyTranslatedDraw(IGuestCompiledShader pixelShader,
+        IReadOnlyList<GuestDrawTexture> textures, IReadOnlyList<GuestMemoryBuffer> globalMemoryBuffers,
+        uint attributeCount, GuestDepthTarget depthTarget, IGuestCompiledShader? vertexShader = null,
+        uint vertexCount = 3, uint instanceCount = 1, uint primitiveType = 4,
+        GuestIndexBuffer? indexBuffer = null, IReadOnlyList<GuestVertexBuffer>? vertexBuffers = null,
+        GuestRenderState? renderState = null, ulong shaderAddress = 0)
+    {
+        EnsureStarted(depthTarget.Width, depthTarget.Height);
+        var ps = Spirv(pixelShader); var vs = vertexShader is null ? null : Spirv(vertexShader);
+        var textureCopy = textures.ToArray(); var memoryCopy = globalMemoryBuffers.ToArray();
+        var vertexCopy = vertexBuffers?.ToArray();
+        Enqueue(handle => Check(handle, NativeGpuPacket.SubmitDraw(handle, ps, textureCopy, memoryCopy,
+            depthTarget.Width, depthTarget.Height, attributeCount, vs, vertexCount, instanceCount,
+            primitiveType, indexBuffer, vertexCopy, renderState, null, false)));
+    }
+
     public void SubmitStorageTranslatedDraw(IGuestCompiledShader pixelShader,
         IReadOnlyList<GuestDrawTexture> textures, IReadOnlyList<GuestMemoryBuffer> globalMemoryBuffers,
-        uint attributeCount, uint width, uint height)
+        uint attributeCount, uint width, uint height, ulong shaderAddress = 0)
     {
         EnsureStarted(width, height); var ps = Spirv(pixelShader);
         var textureCopy = textures.ToArray(); var memoryCopy = globalMemoryBuffers.ToArray();
@@ -141,14 +169,18 @@ internal sealed unsafe class NativeVulkanGuestGpuBackend : IGuestGpuBackend
             width, height, attributeCount, null, 3, 1, 4, null, null, null, targets, false)));
     }
 
-    public void SubmitComputeDispatch(ulong shaderAddress, IGuestCompiledShader computeShader,
+    public long SubmitComputeDispatch(ulong shaderAddress, IGuestCompiledShader computeShader,
         IReadOnlyList<GuestDrawTexture> textures, IReadOnlyList<GuestMemoryBuffer> globalMemoryBuffers,
-        uint groupCountX, uint groupCountY, uint groupCountZ)
+        uint groupCountX, uint groupCountY, uint groupCountZ, uint baseGroupX, uint baseGroupY,
+        uint baseGroupZ, uint localSizeX, uint localSizeY, uint localSizeZ, bool isIndirect,
+        bool writesGlobalMemory, uint threadCountX = uint.MaxValue, uint threadCountY = uint.MaxValue,
+        uint threadCountZ = uint.MaxValue)
     {
         EnsureStarted(1280, 720); var shader = Spirv(computeShader);
         var textureCopy = textures.ToArray(); var memoryCopy = globalMemoryBuffers.ToArray();
         Enqueue(handle => Check(handle, NativeGpuPacket.SubmitCompute(handle, shaderAddress, shader,
             textureCopy, memoryCopy, groupCountX, groupCountY, groupCountZ)));
+        return 0;
     }
 
     public bool TrySubmitGuestImage(ulong address, uint width, uint height, uint pitchInPixel)
@@ -157,6 +189,10 @@ internal sealed unsafe class NativeVulkanGuestGpuBackend : IGuestGpuBackend
         return Invoke(handle => NativeVulkanApi.PresentGuestImage(handle, address, width, height, pitchInPixel)) ==
                NativeGpuResult.Success;
     }
+
+    public bool TrySubmitOrderedGuestImageFlip(int videoOutHandle, int displayBufferIndex, ulong address,
+        uint width, uint height, uint pitchInPixel) =>
+        TrySubmitGuestImage(address, width, height, pitchInPixel);
 
     public void RegisterKnownDisplayBuffer(ulong address, uint guestFormat)
     {
@@ -172,8 +208,8 @@ internal sealed unsafe class NativeVulkanGuestGpuBackend : IGuestGpuBackend
     }
 
     public bool TrySubmitGuestImageBlit(ulong sourceAddress, uint sourceWidth, uint sourceHeight,
-        uint sourceFormat, ulong destinationAddress, uint destinationWidth, uint destinationHeight,
-        uint destinationFormat)
+        uint sourceFormat, uint sourceNumberType, ulong destinationAddress, uint destinationWidth,
+        uint destinationHeight, uint destinationFormat, uint destinationNumberType)
     {
         EnsureStarted(destinationWidth, destinationHeight);
         return Invoke(handle => NativeVulkanApi.BlitGuestImage(handle, sourceAddress, sourceWidth, sourceHeight,
