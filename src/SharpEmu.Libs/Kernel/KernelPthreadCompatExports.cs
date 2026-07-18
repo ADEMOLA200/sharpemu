@@ -691,6 +691,7 @@ public static class KernelPthreadCompatExports
             // parks, so an unlock's PulseAll cannot be missed. Waits are
             // sliced only so teardown can unwind parked threads.
             TracePthreadMutex(ctx, "lock-block", mutexAddress, resolvedAddress, state, currentThreadId, (int)OrbisGen2Result.ORBIS_GEN2_OK);
+            GuestThreadBlocking.NoteBlocked(currentThreadId, "pthread_mutex_lock");
             state.WaiterCount++;
             try
             {
@@ -711,6 +712,7 @@ public static class KernelPthreadCompatExports
             finally
             {
                 state.WaiterCount--;
+                GuestThreadBlocking.NoteUnblocked(currentThreadId);
             }
 
             TracePthreadMutex(ctx, "lock", mutexAddress, resolvedAddress, state, currentThreadId, (int)OrbisGen2Result.ORBIS_GEN2_OK);
@@ -1260,22 +1262,30 @@ public static class KernelPthreadCompatExports
             var deadline = timed
                 ? GuestThreadExecution.ComputeDeadlineTimestamp(GetCondWaitTimeout(timeoutUsec))
                 : long.MaxValue;
-            while (state.SignalsPending == 0 && !GuestThreadBlocking.ShutdownRequested)
+            GuestThreadBlocking.NoteBlocked(currentThreadId, timed ? "pthread_cond_timedwait" : "pthread_cond_wait");
+            try
             {
-                var remaining = timed
-                    ? GetRemainingTimeout(deadline)
-                    : TimeSpan.FromMilliseconds(GuestThreadBlocking.WaitSliceMilliseconds);
-                if (timed && remaining <= TimeSpan.Zero)
+                while (state.SignalsPending == 0 && !GuestThreadBlocking.ShutdownRequested)
                 {
-                    break;
-                }
+                    var remaining = timed
+                        ? GetRemainingTimeout(deadline)
+                        : TimeSpan.FromMilliseconds(GuestThreadBlocking.WaitSliceMilliseconds);
+                    if (timed && remaining <= TimeSpan.Zero)
+                    {
+                        break;
+                    }
 
-                if (remaining > TimeSpan.FromMilliseconds(GuestThreadBlocking.WaitSliceMilliseconds))
-                {
-                    remaining = TimeSpan.FromMilliseconds(GuestThreadBlocking.WaitSliceMilliseconds);
-                }
+                    if (remaining > TimeSpan.FromMilliseconds(GuestThreadBlocking.WaitSliceMilliseconds))
+                    {
+                        remaining = TimeSpan.FromMilliseconds(GuestThreadBlocking.WaitSliceMilliseconds);
+                    }
 
-                _ = Monitor.Wait(state.SyncRoot, remaining);
+                    _ = Monitor.Wait(state.SyncRoot, remaining);
+                }
+            }
+            finally
+            {
+                GuestThreadBlocking.NoteUnblocked(currentThreadId);
             }
 
             if (state.SignalsPending > 0)

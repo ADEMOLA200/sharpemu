@@ -6033,6 +6033,21 @@ public sealed unsafe partial class DirectExecutionBackend : INativeCpuBackend, I
 				Console.Error.WriteLine($"[LOADER][ERROR] Stall stack: [rsp]=0x{value:X16} [rsp+8]=0x{value2:X16}");
 			}
 
+			// Threads blocked in place on host primitives (incl. the primary
+			// thread, which has no _guestThreads entry) and what they wait on.
+			var parked = GuestThreadBlocking.SnapshotBlockDescriptions();
+			if (parked.Length != 0)
+			{
+				var builder = new System.Text.StringBuilder(64 + parked.Length * 40);
+				builder.Append("[LOADER][ERROR] Stall in-place blocks:");
+				foreach (var entry in parked)
+				{
+					builder.Append($" 0x{entry.Key:X16}={entry.Value}");
+				}
+
+				Console.Error.WriteLine(builder.ToString());
+			}
+
 			var threads = SnapshotGuestThreads();
 			if (threads.Length != 0)
 			{
@@ -6053,12 +6068,17 @@ public sealed unsafe partial class DirectExecutionBackend : INativeCpuBackend, I
 						hostContextText = $" host_tid={hostThreadId} host_ctx=unavailable";
 					}
 
+					// Threads parked in place on a host primitive stay state=Running;
+					// GuestThreadBlocking records what they are parked on.
+					var blockText = thread.BlockReason
+						?? GuestThreadBlocking.DescribeBlock(thread.ThreadHandle)
+						?? "none";
 					Console.Error.WriteLine(
 						$"[LOADER][ERROR] Stall guest-thread: handle=0x{thread.ThreadHandle:X16} name='{thread.Name}' " +
 						$"state={thread.State} imports={Interlocked.Read(ref thread.ImportCount)} " +
 						$"nid={Volatile.Read(ref thread.LastImportNid) ?? "none"} ret=0x{Volatile.Read(ref thread.LastReturnRip):X16} " +
 						$"rdi=0x{Volatile.Read(ref thread.LastImportRdi):X16} rsi=0x{Volatile.Read(ref thread.LastImportRsi):X16} " +
-						$"rdx=0x{Volatile.Read(ref thread.LastImportRdx):X16} block={thread.BlockReason ?? "none"}{hostContextText}");
+						$"rdx=0x{Volatile.Read(ref thread.LastImportRdx):X16} block={blockText}{hostContextText}");
 					logged++;
 					if (logged >= 48 && threads.Length > logged)
 					{

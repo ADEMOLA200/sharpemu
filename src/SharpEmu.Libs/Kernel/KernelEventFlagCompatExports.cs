@@ -249,6 +249,7 @@ public static class KernelEventFlagCompatExports
             // event flags: OR/AND over the bit pattern, optional clear).
             state.WaitingThreads++;
             if (_traceEventFlag) TraceEventFlag($"wait-block handle=0x{handle:X16} pattern=0x{pattern:X16} waiters={state.WaitingThreads} guest_thread=0x{GuestThreadExecution.CurrentGuestThreadHandle:X16} ret=0x{returnRip:X16}");
+            GuestThreadBlocking.NoteBlocked(GuestThreadExecution.CurrentGuestThreadHandle, "sceKernelWaitEventFlag");
             try
             {
                 while (true)
@@ -282,6 +283,7 @@ public static class KernelEventFlagCompatExports
             finally
             {
                 state.WaitingThreads = Math.Max(0, state.WaitingThreads - 1);
+                GuestThreadBlocking.NoteUnblocked(GuestThreadExecution.CurrentGuestThreadHandle);
             }
         }
     }

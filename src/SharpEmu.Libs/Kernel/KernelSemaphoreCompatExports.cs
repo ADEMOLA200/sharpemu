@@ -127,6 +127,7 @@ public static class KernelSemaphoreCompatExports
                     TraceSemaphore($"wait-block handle=0x{handle:X8} name='{semaphore.Name}' need={needCount} count={semaphore.Count} timeout={(timeoutAddress == 0 ? "infinite" : timeoutUsec)} waiters={semaphore.WaitingThreads} {FormatCallSite(ctx)}");
                 }
 
+                GuestThreadBlocking.NoteBlocked(GuestThreadExecution.CurrentGuestThreadHandle, "sceKernelWaitSema");
                 try
                 {
                     while (semaphore.Count < needCount)
@@ -159,6 +160,7 @@ public static class KernelSemaphoreCompatExports
                 finally
                 {
                     semaphore.WaitingThreads = Math.Max(0, semaphore.WaitingThreads - 1);
+                    GuestThreadBlocking.NoteUnblocked(GuestThreadExecution.CurrentGuestThreadHandle);
                 }
             }
 

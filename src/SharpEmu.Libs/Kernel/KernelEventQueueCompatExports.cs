@@ -421,28 +421,36 @@ public static class KernelEventQueueCompatExports
         }
 
         TraceEventQueue(ctx, "wait-block", handle);
-        lock (_eventQueueGate)
+        GuestThreadBlocking.NoteBlocked(GuestThreadExecution.CurrentGuestThreadHandle, "sceKernelWaitEqueue");
+        try
         {
-            while (true)
+            lock (_eventQueueGate)
             {
-                if ((_pendingEvents.TryGetValue(handle, out var queue) && queue.Count != 0) ||
-                    !_eventQueues.Contains(handle) ||
-                    GuestThreadBlocking.ShutdownRequested)
+                while (true)
                 {
-                    break;
-                }
+                    if ((_pendingEvents.TryGetValue(handle, out var queue) && queue.Count != 0) ||
+                        !_eventQueues.Contains(handle) ||
+                        GuestThreadBlocking.ShutdownRequested)
+                    {
+                        break;
+                    }
 
-                var remaining = deadline - Environment.TickCount64;
-                if (timeoutAddress != 0 && remaining <= 0)
-                {
-                    break;
-                }
+                    var remaining = deadline - Environment.TickCount64;
+                    if (timeoutAddress != 0 && remaining <= 0)
+                    {
+                        break;
+                    }
 
-                var slice = timeoutAddress == 0
-                    ? GuestThreadBlocking.WaitSliceMilliseconds
-                    : (int)Math.Min(remaining, GuestThreadBlocking.WaitSliceMilliseconds);
-                _ = Monitor.Wait(_eventQueueGate, slice);
+                    var slice = timeoutAddress == 0
+                        ? GuestThreadBlocking.WaitSliceMilliseconds
+                        : (int)Math.Min(remaining, GuestThreadBlocking.WaitSliceMilliseconds);
+                    _ = Monitor.Wait(_eventQueueGate, slice);
+                }
             }
+        }
+        finally
+        {
+            GuestThreadBlocking.NoteUnblocked(GuestThreadExecution.CurrentGuestThreadHandle);
         }
 
         deliveredCount = DequeueEvents(ctx, handle, eventsAddress, eventCapacity);
