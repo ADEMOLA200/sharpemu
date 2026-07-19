@@ -1773,6 +1773,58 @@ public static partial class AgcExports
         return ReturnPointer(ctx, commandAddress);
     }
 
+    // Single-register variant of the SET_SH_REG builders: the register rides
+    // in rsi as a packed struct (low 16 bits = register offset, high dword =
+    // byte offset of this dword within a multi-dword register write) and the
+    // value in edx. Emits the same 3-dword SET_SH_REG packet the plural
+    // sceAgcCbSetShRegistersDirect path produces per run. Hades calls this
+    // ~1k times per boot; leaving it unresolved corrupted its DCB stream.
+    [SysAbiExport(
+        Nid = "pFLArOT53+w",
+        ExportName = "sceAgcDcbSetShRegisterDirect",
+        Target = Generation.Gen5,
+        LibraryName = "libSceAgc")]
+    public static int DcbSetShRegisterDirect(CpuContext ctx)
+    {
+        var commandBufferAddress = ctx[CpuRegister.Rdi];
+        var packedRegister = ctx[CpuRegister.Rsi];
+        var value = (uint)ctx[CpuRegister.Rdx];
+        if (commandBufferAddress == 0)
+        {
+            return ReturnPointer(ctx, 0);
+        }
+
+        var offset = (uint)(packedRegister & 0xFFFFu) + (uint)((packedRegister >> 32) >> 2);
+        if (!TryAllocateCommandDwords(ctx, commandBufferAddress, 3, out var commandAddress) ||
+            !TryWriteUInt32(ctx, commandAddress, Pm4(3, ItSetShReg, 0)) ||
+            !TryWriteUInt32(ctx, commandAddress + 4, offset & 0xFFFFu) ||
+            !TryWriteUInt32(ctx, commandAddress + 8, value))
+        {
+            return ReturnPointer(ctx, 0);
+        }
+
+        TraceAgc($"agc.dcb_set_sh_register_direct buf=0x{commandBufferAddress:X16} reg=0x{offset:X4} value=0x{value:X8}");
+        return ReturnPointer(ctx, commandAddress);
+    }
+
+    // Size probe for the wait-on-address writer below: same argument prefix
+    // minus the command buffer, returns the byte size the writer will emit so
+    // the game can reserve DCB space (7 dwords for a standard WAIT_REG_MEM,
+    // 6/9 for the 32/64-bit polled-NOP forms).
+    [SysAbiExport(
+        Nid = "43WJ08sSugE",
+        ExportName = "sceAgcDcbWaitOnAddressGetSize",
+        Target = Generation.Gen5,
+        LibraryName = "libSceAgc")]
+    public static int DcbWaitOnAddressGetSize(CpuContext ctx)
+    {
+        var size = (uint)(ctx[CpuRegister.Rdi] & 0xFF);
+        var operation = (uint)(ctx[CpuRegister.Rdx] & 0xFF);
+        var packetDwords = operation is 2 or 3 ? 7u : size == 0 ? 6u : 9u;
+        ctx[CpuRegister.Rax] = packetDwords * sizeof(uint);
+        return (int)ctx[CpuRegister.Rax];
+    }
+
     [SysAbiExport(
         Nid = "VmW0Tdpy420",
         ExportName = "sceAgcDcbWaitRegMem",

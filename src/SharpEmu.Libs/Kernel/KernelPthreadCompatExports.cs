@@ -120,6 +120,13 @@ public static class KernelPthreadCompatExports
     }
 
     [SysAbiExport(
+        Nid = "9vyP6Z7bqzc",
+        ExportName = "pthread_rename_np",
+        Target = Generation.Gen4 | Generation.Gen5,
+        LibraryName = "libKernel")]
+    public static int PosixPthreadRenameNp(CpuContext ctx) => PthreadRename(ctx);
+
+    [SysAbiExport(
         Nid = "GBUY7ywdULE",
         ExportName = "scePthreadRename",
         Target = Generation.Gen4 | Generation.Gen5,
