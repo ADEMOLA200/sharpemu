@@ -35,6 +35,38 @@ public static class UserServiceExports
     }
 
     [SysAbiExport(
+        Nid = "az-0R6eviZ0",
+        ExportName = "sceUserServiceInitialize2",
+        Target = Generation.Gen4 | Generation.Gen5,
+        LibraryName = "libSceUserService")]
+    public static int UserServiceInitialize2(CpuContext ctx)
+    {
+        Trace("initialize2");
+        ctx[CpuRegister.Rax] = 0;
+        return (int)OrbisGen2Result.ORBIS_GEN2_OK;
+    }
+
+    [SysAbiExport(
+        Nid = "qbwy0Ub8b3M",
+        ExportName = "sceUserServiceGetUserNumber",
+        Target = Generation.Gen4 | Generation.Gen5,
+        LibraryName = "libSceUserService")]
+    public static int UserServiceGetUserNumber(CpuContext ctx)
+    {
+        var userId = unchecked((int)ctx[CpuRegister.Rdi]);
+        var outNumberAddress = ctx[CpuRegister.Rsi];
+        if (outNumberAddress == 0)
+        {
+            return SetReturn(ctx, OrbisUserServiceErrorInvalidArgument);
+        }
+
+        // The primary user is always user number 0.
+        return TryWriteInt32(ctx, outNumberAddress, 0)
+            ? SetReturnWithTrace(ctx, 0, $"get_user_number user={userId} number=0 out=0x{outNumberAddress:X16}")
+            : SetReturn(ctx, (int)OrbisGen2Result.ORBIS_GEN2_ERROR_MEMORY_FAULT);
+    }
+
+    [SysAbiExport(
         Nid = "CdWp0oHWGr0",
         ExportName = "sceUserServiceGetInitialUser",
         Target = Generation.Gen4 | Generation.Gen5,
