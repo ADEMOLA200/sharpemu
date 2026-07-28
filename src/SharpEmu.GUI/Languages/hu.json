@@ -142,7 +142,7 @@
   "About.Discord.Label": "Discord",
   "About.Discord.Desc": "Csatlakozz a közösséghe, kérj segítéget és kövesd nyomon a fejlesztést.",
   "About.GithubButton": "Járulj hozzá GitHubon!",
-  "About.DiscordButton": "Csatlakozz a Discordunhoz!",
+  "About.DiscordComingSoon": "Hamarosan",
 
   "Library.Context.GameSettings": "Játékbeállítások…",
   "Options.Env.WritableApp0.Desc": "Engedélyezi, hogy a játékok fájlokat hozzanak létre és írjanak a telepítési mappájukban.\nA kicsomagolt dumpokhoz szükséges, amelyek a mentéseiket vagy beállításaikat az /app0 alá írják.",
