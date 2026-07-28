@@ -242,7 +242,9 @@ public partial class MainWindow : Window
         EnvLogNpToggle.IsCheckedChanged += (_, _) =>
             SetEnvironmentToggle("SHARPEMU_LOG_NP", EnvLogNpToggle.IsChecked == true);
         EnvGuestImageCpuSyncToggle.IsCheckedChanged += (_, _) =>
-            SetGuestImageCpuSync(EnvGuestImageCpuSyncToggle.IsChecked == true);
+            SetEnvironmentToggle(
+                "SHARPEMU_GUEST_IMAGE_CPU_SYNC",
+                EnvGuestImageCpuSyncToggle.IsChecked == true);
         LanguageBox.SelectionChanged += (_, _) => OnLanguageChanged();
 
         GameList.AddHandler(ContextRequestedEvent, OnGameContextRequested, RoutingStrategies.Tunnel);
@@ -853,10 +855,8 @@ public partial class MainWindow : Window
         EnvLogDirectMemoryToggle.IsChecked = _settings.EnvironmentToggles.Contains("SHARPEMU_LOG_DIRECT_MEMORY");
         EnvLogIoToggle.IsChecked = _settings.EnvironmentToggles.Contains("SHARPEMU_LOG_IO");
         EnvLogNpToggle.IsChecked = _settings.EnvironmentToggles.Contains("SHARPEMU_LOG_NP");
-        EnvGuestImageCpuSyncToggle.IsChecked = IsEnvironmentEnabled(
-            _settings.EnvironmentToggles,
-            "SHARPEMU_GUEST_IMAGE_CPU_SYNC",
-            defaultValue: true);
+        EnvGuestImageCpuSyncToggle.IsChecked =
+            _settings.EnvironmentToggles.Contains("SHARPEMU_GUEST_IMAGE_CPU_SYNC");
         WindowModeBox.SelectedIndex = ChoiceIndex(_settings.WindowMode, "Windowed", "Borderless", "Exclusive");
         LoadHostDisplayOptions();
         ScalingModeBox.SelectedIndex = ChoiceIndex(_settings.ScalingMode, "Fit", "Cover", "Stretch", "Integer");
@@ -1081,40 +1081,6 @@ public partial class MainWindow : Window
         {
             _settings.EnvironmentToggles.Remove(name);
         }
-    }
-
-    private void SetGuestImageCpuSync(bool enabled)
-    {
-        const string name = "SHARPEMU_GUEST_IMAGE_CPU_SYNC";
-        _settings.EnvironmentToggles.RemoveAll(entry =>
-            string.Equals(entry, name, StringComparison.OrdinalIgnoreCase) ||
-            string.Equals(entry, name + "=0", StringComparison.OrdinalIgnoreCase));
-        if (!enabled)
-        {
-            _settings.EnvironmentToggles.Add(name + "=0");
-        }
-    }
-
-    private static bool IsEnvironmentEnabled(
-        IEnumerable<string> entries,
-        string name,
-        bool defaultValue)
-    {
-        foreach (var entry in entries)
-        {
-            if (string.Equals(entry, name + "=0", StringComparison.OrdinalIgnoreCase))
-            {
-                return false;
-            }
-
-            if (string.Equals(entry, name, StringComparison.OrdinalIgnoreCase) ||
-                string.Equals(entry, name + "=1", StringComparison.OrdinalIgnoreCase))
-            {
-                return true;
-            }
-        }
-
-        return defaultValue;
     }
 
     private string SelectedLogLevel()

@@ -8459,15 +8459,13 @@ internal static unsafe class VulkanVideoPresenter
         /// </summary>
         private void DrainGuestImageCpuSync()
         {
-            if (!SharpEmu.HLE.GuestImageWriteTracker.Enabled)
-            {
-                return;
-            }
-
-            _ = Interlocked.Exchange(ref _cpuWrittenGuestImageSyncRequested, 0);
-
+            var syncEnabled = SharpEmu.HLE.GuestImageWriteTracker.Enabled;
             HashSet<ulong>? dirtyAddresses = null;
             List<(ulong Address, uint Width, uint Height, ulong ByteCount)>? extents = null;
+            if (syncEnabled)
+            {
+            _ = Interlocked.Exchange(ref _cpuWrittenGuestImageSyncRequested, 0);
+
             lock (_gate)
             {
                 if (_guestImageExtents.Count > 0)
@@ -8534,6 +8532,8 @@ internal static unsafe class VulkanVideoPresenter
                             $"[SYNC] cpu-write-drain addr=0x{address:X} {width}x{height}");
                     }
                 }
+            }
+
             }
 
             if (_textureCache.Count == 0)
@@ -14508,27 +14508,26 @@ internal static unsafe class VulkanVideoPresenter
 
             if (!tookPresentation)
             {
-                // Upstream also replays the last host splash here after an
-                // embedded-surface resize. That path is gone with the SDL
-                // window: there is no host surface to resize around, and the
-                // swapchain recreate above already covers SDL's own resize.
-                //
                 // A render-loop tick with no newer flip is normal. Warn only when
                 // an actual queued presentation is waiting on unfinished guest work.
-                var hasPendingPresentation =
-                    HasPendingGuestPresentation(_presentedSequence);
-                SharpEmu.Libs.Diagnostics.LoadProgressDiagnostics.TracePresentNotTaken(
-                    _presentedSequence,
-                    hasPendingPresentation);
-                SharpEmu.Libs.Diagnostics.LoadProgressDiagnostics.TraceGpuWaitSnapshot();
-                if (ShouldTracePresentedGuestImageContentsForDiagnostics() &&
-                    hasPendingPresentation &&
-                    _presentNotTakenLoggedSequence != _presentedSequence)
+                if (SharpEmu.Libs.Diagnostics.LoadProgressDiagnostics.IsActive ||
+                    ShouldTracePresentedGuestImageContentsForDiagnostics())
                 {
-                    _presentNotTakenLoggedSequence = _presentedSequence;
-                    Console.Error.WriteLine(
-                        $"[LOADER][WARN] vk.present_not_taken seq={_presentedSequence} " +
-                        "— presentation submitted but its required guest work isn't complete; nothing shown.");
+                    var hasPendingPresentation =
+                        HasPendingGuestPresentation(_presentedSequence);
+                    SharpEmu.Libs.Diagnostics.LoadProgressDiagnostics.TracePresentNotTaken(
+                        _presentedSequence,
+                        hasPendingPresentation);
+                    SharpEmu.Libs.Diagnostics.LoadProgressDiagnostics.TraceGpuWaitSnapshot();
+                    if (ShouldTracePresentedGuestImageContentsForDiagnostics() &&
+                        hasPendingPresentation &&
+                        _presentNotTakenLoggedSequence != _presentedSequence)
+                    {
+                        _presentNotTakenLoggedSequence = _presentedSequence;
+                        Console.Error.WriteLine(
+                            $"[LOADER][WARN] vk.present_not_taken seq={_presentedSequence} " +
+                            "— presentation submitted but its required guest work isn't complete; nothing shown.");
+                    }
                 }
 
                 return;

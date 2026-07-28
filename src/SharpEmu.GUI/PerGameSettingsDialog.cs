@@ -241,7 +241,7 @@ public sealed class PerGameSettingsDialog : Window
         _hdrMode.SelectedItem = ChoiceOrDefault(HdrModes, global.HdrMode, "Auto");
         foreach (var (name, box) in _envBoxes)
         {
-            box.IsChecked = IsEnvironmentEnabled(global.EnvironmentToggles, name, defaultValue: name == "SHARPEMU_GUEST_IMAGE_CPU_SYNC");
+            box.IsChecked = IsEnvironmentEnabled(global.EnvironmentToggles, name, defaultValue: false);
         }
 
         if (existing is null)
@@ -295,7 +295,7 @@ public sealed class PerGameSettingsDialog : Window
             _envRow.IsOverridden = true;
             foreach (var (name, box) in _envBoxes)
             {
-                box.IsChecked = IsEnvironmentEnabled(env, name, defaultValue: name == "SHARPEMU_GUEST_IMAGE_CPU_SYNC");
+                box.IsChecked = IsEnvironmentEnabled(env, name, defaultValue: false);
             }
         }
     }
@@ -396,17 +396,10 @@ public sealed class PerGameSettingsDialog : Window
 
     private List<string> BuildEnvironmentEntries()
     {
-        const string guestImageCpuSync = "SHARPEMU_GUEST_IMAGE_CPU_SYNC";
-        var entries = _envBoxes
-            .Where(entry => entry.Name != guestImageCpuSync && entry.Box.IsChecked == true)
+        return _envBoxes
+            .Where(entry => entry.Box.IsChecked == true)
             .Select(entry => entry.Name)
             .ToList();
-        if (_envBoxes.First(entry => entry.Name == guestImageCpuSync).Box.IsChecked != true)
-        {
-            entries.Add(guestImageCpuSync + "=0");
-        }
-
-        return entries;
     }
 
     private static bool IsEnvironmentEnabled(

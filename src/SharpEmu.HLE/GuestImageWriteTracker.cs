@@ -87,13 +87,10 @@ public static unsafe class GuestImageWriteTracker
 
     private static RangeSnapshot _rangeSnapshot = RangeSnapshot.Empty;
 
-    // CPU-written guest image synchronization is the compatible default. A few
-    // titles (currently GTA V) require the lower-overhead watch-only path and
-    // opt out explicitly with SHARPEMU_GUEST_IMAGE_CPU_SYNC=0.
     private static readonly bool _enabled =
-        !string.Equals(
+        string.Equals(
             Environment.GetEnvironmentVariable("SHARPEMU_GUEST_IMAGE_CPU_SYNC"),
-            "0",
+            "1",
             StringComparison.Ordinal);
     private static readonly (bool Wildcard, ulong[] Addresses) _lifetimeTraceFilter =
         ParseAddressList(Environment.GetEnvironmentVariable("SHARPEMU_TRACE_GUEST_IMAGE_ADDRS"));
