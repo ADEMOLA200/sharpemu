@@ -639,6 +639,7 @@ public partial class MainWindow : Window
         EnvLogDirectMemoryRow.Description = loc.Get("Options.Env.LogDirectMemory.Desc");
         EnvLogIoRow.Description = loc.Get("Options.Env.LogIo.Desc");
         EnvLogNpRow.Description = loc.Get("Options.Env.LogNp.Desc");
+        EnvGuestImageCpuSyncRow.Description = loc.Get("Options.Env.GuestImageCpuSync.Desc");
         EmulationSectionTitle.Text = loc.Get("Options.Section.Emulation");
         LoggingSectionTitle.Text = loc.Get("Options.Section.Logging");
         LauncherSectionTitle.Text = loc.Get("Options.Section.Launcher");

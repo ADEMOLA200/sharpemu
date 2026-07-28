@@ -37,6 +37,7 @@
   "Options.Env.LogDirectMemory.Desc": "Log direct memory allocations and failures to the console.\nUse when a game aborts or exits during boot.",
   "Options.Env.LogIo.Desc": "Log file open, read, and path-resolve activity to the console.\nUse when a game cannot find its data files during boot.",
   "Options.Env.LogNp.Desc": "Log NP (PlayStation Network) library calls to the console.",
+  "Options.Env.GuestImageCpuSync.Desc": "Re-upload guest surfaces the game's own CPU code rewrites.\nLeave off normally. Turn on for titles whose CPU-drawn surfaces never reach the screen.\nCosts performance and regresses some titles, such as GTA V.",
   "Options.Section.Emulation": "EMULATION",
   "Options.Section.Logging": "LOGGING",
   "Options.Section.Launcher": "LAUNCHER",

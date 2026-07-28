@@ -520,7 +520,7 @@ SPDX-License-Identifier: GPL-2.0-or-later
                       </local:SettingRow>
 
                       <local:SettingRow x:Name="EnvGuestImageCpuSyncRow" LabelFontFamily="Consolas,monospace" Label="SHARPEMU_GUEST_IMAGE_CPU_SYNC"
-                                        Description="Re-upload guest surfaces the game's own CPU code rewrites.&#10;Enabled by default for compatibility.&#10;Disable only for titles that regress with it, such as GTA V.">
+                                        Description="Re-upload guest surfaces the game's own CPU code rewrites.&#10;Leave off normally. Turn on for titles whose CPU-drawn surfaces never reach the screen.&#10;Costs performance and regresses some titles, such as GTA V.">
                         <ToggleSwitch x:Name="EnvGuestImageCpuSyncToggle" OnContent="On" OffContent="Off"
                                       VerticalAlignment="Center" />
                       </local:SettingRow>
