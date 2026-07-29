@@ -298,6 +298,8 @@ public partial class MainWindow : Window
             SetEnvironmentToggle(
                 "SHARPEMU_GUEST_IMAGE_CPU_SYNC",
                 EnvGuestImageCpuSyncToggle.IsChecked == true);
+        DefaultProfileBox.TextChanged += (_, _) =>
+            _settings.DefaultProfile = GuiSettings.NormalizeDefaultProfile(DefaultProfileBox.Text);
         LanguageBox.SelectionChanged += (_, _) => OnLanguageChanged();
 
         GameList.AddHandler(ContextRequestedEvent, OnGameContextRequested, RoutingStrategies.Tunnel);
@@ -883,6 +885,7 @@ public partial class MainWindow : Window
         EnvLogNpToggle.IsChecked = _settings.EnvironmentToggles.Contains("SHARPEMU_LOG_NP");
         EnvGuestImageCpuSyncToggle.IsChecked =
             _settings.EnvironmentToggles.Contains("SHARPEMU_GUEST_IMAGE_CPU_SYNC");
+        DefaultProfileBox.Text = _settings.DefaultProfile;
         WindowModeBox.SelectedIndex = ChoiceIndex(_settings.WindowMode, "Windowed", "Borderless", "Exclusive");
         LoadHostDisplayOptions();
         ScalingModeBox.SelectedIndex = ChoiceIndex(_settings.ScalingMode, "Fit", "Cover", "Stretch", "Integer");
@@ -1108,6 +1111,8 @@ public partial class MainWindow : Window
             _settings.EnvironmentToggles.Remove(name);
         }
     }
+
+    private const string DefaultProfileEnvironmentName = "SHARPEMU_DEFAULT_PROFILE";
 
     private string SelectedLogLevel()
     {
@@ -2006,9 +2011,19 @@ public partial class MainWindow : Window
                 continue;
             }
 
+            if (string.Equals(name, DefaultProfileEnvironmentName, StringComparison.OrdinalIgnoreCase))
+            {
+                continue;
+            }
+
             Environment.SetEnvironmentVariable(name, value);
             _appliedEnvironmentVariables.Add(name);
         }
+
+        Environment.SetEnvironmentVariable(
+            DefaultProfileEnvironmentName,
+            GuiSettings.NormalizeDefaultProfile(_settings.DefaultProfile));
+        _appliedEnvironmentVariables.Add(DefaultProfileEnvironmentName);
 
         Environment.SetEnvironmentVariable(
             "SHARPEMU_RENDER_SCALE",
