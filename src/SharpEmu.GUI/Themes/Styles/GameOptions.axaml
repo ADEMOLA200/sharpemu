@@ -103,6 +103,36 @@ Contextual per-game options reveal, actions, and selected-game motion.
     <Setter Property="Foreground" Value="White" />
   </Style>
 
+  <Style Selector="StackPanel.selectedDetailsHost">
+    <Setter Property="Spacing" Value="18" />
+  </Style>
+
+  <Style Selector="TextBlock.selectedGameTitle">
+    <Setter Property="FontSize" Value="42" />
+  </Style>
+
+  <Style Selector="StackPanel.selectedDetailsHost.gridLayout">
+    <Setter Property="Spacing" Value="12" />
+  </Style>
+
+  <Style Selector="StackPanel.selectedDetailsHost.gridLayout TextBlock.selectedGameTitle">
+    <Setter Property="FontSize" Value="26" />
+  </Style>
+
+  <Style Selector="StackPanel.selectedDetailsHost.gridLayout Button.playButton">
+    <Setter Property="MinHeight" Value="44" />
+    <Setter Property="MinWidth" Value="168" />
+    <Setter Property="Padding" Value="28,10" />
+    <Setter Property="FontSize" Value="15" />
+  </Style>
+
+  <Style Selector="StackPanel.selectedDetailsHost.gridLayout Button.optionsCircle,
+                   StackPanel.selectedDetailsHost.gridLayout ToggleButton.optionsCircle">
+    <Setter Property="Width" Value="44" />
+    <Setter Property="Height" Value="44" />
+    <Setter Property="CornerRadius" Value="22" />
+  </Style>
+
   <Style Selector="Button.gameOptionsLaunch">
     <Setter Property="Width" Value="220" />
     <Setter Property="Height" Value="46" />

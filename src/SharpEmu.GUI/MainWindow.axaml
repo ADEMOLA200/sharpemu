@@ -136,6 +136,13 @@ SPDX-License-Identifier: GPL-2.0-or-later
 
         <StackPanel Grid.Column="2" x:Name="LibraryToolbar" Orientation="Horizontal" Spacing="8"
                     VerticalAlignment="Center">
+          <Button x:Name="LibraryLayoutButton"
+                  Classes="iconGhost"
+                  VerticalAlignment="Center">
+            <TextBlock x:Name="LibraryLayoutGlyph"
+                       Classes="materialSymbol compact"
+                       Text="grid_view" />
+          </Button>
           <TextBox x:Name="SearchBox"
                    PlaceholderText="{Binding [Library.SearchWatermark], Source={x:Static local:Localization.Instance}}"
                    Width="240"
@@ -167,7 +174,7 @@ SPDX-License-Identifier: GPL-2.0-or-later
               </Transitions>
             </Panel.Transitions>
             <ListBox x:Name="GameList" Classes="tileGrid" Background="Transparent"
-                     SelectionMode="Single" Padding="4,0,28,0">
+                     SelectionMode="Single">
             <ListBox.ContextMenu>
               <ContextMenu x:Name="GameContextMenu" Placement="Pointer">
                 <MenuItem x:Name="CtxLaunch"
@@ -218,32 +225,35 @@ SPDX-License-Identifier: GPL-2.0-or-later
                 </MenuItem>
               </ContextMenu>
             </ListBox.ContextMenu>
-            <ListBox.ItemsPanel>
-              <ItemsPanelTemplate>
-                <VirtualizingStackPanel Orientation="Horizontal" />
-              </ItemsPanelTemplate>
-            </ListBox.ItemsPanel>
             <ListBox.DataTemplates>
               <DataTemplate x:DataType="local:GameEntry" x:CompileBindings="True">
-                <Border Classes="coverShadow libraryGameCard"
-                        Width="148"
-                        Height="148"
-                        ToolTip.Tip="{Binding Name}"
-                        AutomationProperties.Name="{Binding Name}">
-                  <Border Classes="coverClip">
-                    <Panel>
-                      <Border Background="{Binding PlaceholderBrush}" IsVisible="{Binding !HasCover}">
-                        <TextBlock Text="{Binding Initials}" FontSize="38" FontWeight="Light"
-                                   Foreground="#C4E8ECF4"
-                                   HorizontalAlignment="Center" VerticalAlignment="Center" />
-                      </Border>
-                      <Image Source="{Binding Cover}"
-                             Stretch="UniformToFill"
-                             RenderOptions.BitmapInterpolationMode="LowQuality"
-                             IsVisible="{Binding HasCover}" />
-                    </Panel>
+                <StackPanel Spacing="7">
+                  <Border Classes="coverShadow libraryGameCard"
+                          Width="148"
+                          Height="148"
+                          ToolTip.Tip="{Binding Name}"
+                          AutomationProperties.Name="{Binding Name}">
+                    <Border Classes="coverClip">
+                      <Panel>
+                        <Border Background="{Binding PlaceholderBrush}" IsVisible="{Binding !HasCover}">
+                          <TextBlock Text="{Binding Initials}" FontSize="38" FontWeight="Light"
+                                     Foreground="#C4E8ECF4"
+                                     HorizontalAlignment="Center" VerticalAlignment="Center" />
+                        </Border>
+                        <Image Source="{Binding Cover}"
+                               Stretch="UniformToFill"
+                               RenderOptions.BitmapInterpolationMode="LowQuality"
+                               IsVisible="{Binding HasCover}" />
+                      </Panel>
+                    </Border>
                   </Border>
-                </Border>
+                  <TextBlock Classes="libraryTileName"
+                             Text="{Binding Name}"
+                             TextWrapping="Wrap"
+                             MaxLines="2"
+                             TextTrimming="CharacterEllipsis"
+                             TextAlignment="Center" />
+                </StackPanel>
               </DataTemplate>
               <DataTemplate x:DataType="local:AddFolderTile">
                 <Border Classes="addFolderTile"
@@ -292,8 +302,7 @@ SPDX-License-Identifier: GPL-2.0-or-later
                       MaxWidth="980"
                       HorizontalAlignment="Left"
                       VerticalAlignment="Top"
-                      Margin="4,8,0,0"
-                      Spacing="18">
+                      Margin="4,8,0,0">
             <StackPanel.Transitions>
               <Transitions>
                 <DoubleTransition Property="Opacity"
@@ -302,8 +311,8 @@ SPDX-License-Identifier: GPL-2.0-or-later
                                                Duration="0:0:0.18" />
               </Transitions>
             </StackPanel.Transitions>
-            <TextBlock Text="{Binding Name}"
-                       FontSize="42"
+            <TextBlock Classes="selectedGameTitle"
+                       Text="{Binding Name}"
                        FontWeight="SemiBold"
                        TextWrapping="Wrap"
                        TextTrimming="CharacterEllipsis"

@@ -9,6 +9,8 @@
   "Library.SearchWatermark": "Search library…",
   "Library.AddFolder": "Add folder",
   "Library.OpenFile": "Open file…",
+  "Library.View.Grid": "Stacked view",
+  "Library.View.Carousel": "Row view",
 
   "Library.Context.Launch": "Launch",
   "Library.Context.OpenFolder": "Open game folder",

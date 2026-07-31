@@ -476,18 +476,6 @@ public partial class MainWindow
         ("SHARPEMU_GUEST_IMAGE_CPU_SYNC", GameEnvGuestImageCpuSyncToggle),
     ];
 
-    private static void SetGameOptionsOpenClass(Control control, bool active)
-    {
-        if (active)
-        {
-            if (!control.Classes.Contains("gameOptionsOpen"))
-            {
-                control.Classes.Add("gameOptionsOpen");
-            }
-        }
-        else
-        {
-            control.Classes.Remove("gameOptionsOpen");
-        }
-    }
+    private static void SetGameOptionsOpenClass(Control control, bool active) =>
+        SetClass(control, "gameOptionsOpen", active);
 }
