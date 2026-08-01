@@ -86,6 +86,7 @@ public partial class MainWindow
             CloseGameSettings();
             LaunchSelected();
         };
+        GameOptionsCloseButton.Click += (_, _) => CloseGameSettings();
         GameOptionsOpenFolderButton.Click += (_, _) => OpenSelectedGameFolder();
         GameOptionsCopyPathButton.Click += async (_, _) =>
             await CopyToClipboardAsync((GameList.SelectedItem as GameEntry)?.Path);
@@ -140,6 +141,7 @@ public partial class MainWindow
             !string.IsNullOrWhiteSpace(game.TitleId);
 
         _isGameSettingsOpen = true;
+        SetGameOptionsPagesSpan(coversConsoleRow: true);
         SetGameOptionsOpenClass(BackdropLayer, active: true);
         SetGameOptionsOpenClass(CarouselHost, active: true);
         SetGameOptionsOpenClass(LibrarySelectedDetails, active: true);
@@ -158,6 +160,7 @@ public partial class MainWindow
         }
 
         _isGameSettingsOpen = false;
+        SetGameOptionsPagesSpan(coversConsoleRow: false);
         SetGameOptionsNavigationIndicator(_gameOptionsIndicatorIndex, animate: false);
         _gameSettingsTitleId = null;
         _gameEnvironmentPassthrough.Clear();
@@ -436,6 +439,11 @@ public partial class MainWindow
             button,
             _gameOptionsIndicatorIndex,
             animate);
+    }
+
+    private void SetGameOptionsPagesSpan(bool coversConsoleRow)
+    {
+        Grid.SetRowSpan(PagesHost, coversConsoleRow ? 2 : 1);
     }
 
     private Button[] GameOptionsNavigationButtons() =>

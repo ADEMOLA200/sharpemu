@@ -36,7 +36,7 @@ public partial class MainWindow : Window
     private const int MaxConsoleLines = 4000;
     private const int MaxConsoleLinesPerFlush = 500;
     private static readonly TimeSpan NavigationIndicatorAnimationDuration =
-        TimeSpan.FromMilliseconds(240);
+        TimeSpan.FromMilliseconds(180);
 
     private static readonly IBrush DefaultLineBrush = new SolidColorBrush(Color.Parse("#C7CFDE"));
     private static readonly IBrush DimLineBrush = new SolidColorBrush(Color.Parse("#6B7488"));
@@ -555,7 +555,7 @@ public partial class MainWindow : Window
         translationAnimation.InsertExpressionKeyFrame(
             1f,
             "this.FinalValue",
-            new SineEaseInOut());
+            new CubicEaseOut());
 
         var animations = visual.Compositor.CreateImplicitAnimationCollection();
         animations[nameof(CompositionVisual.Translation)] = translationAnimation;
@@ -848,6 +848,8 @@ public partial class MainWindow : Window
         {
             _ = CheckForUpdatesAsync();
         }
+
+        SeedLibraryFromCache();
         await RescanLibraryAsync();
     }
 
@@ -1547,6 +1549,31 @@ public partial class MainWindow : Window
         }
     }
 
+    /// <summary>
+    /// Paints the previous scan's result before the real scan starts. The
+    /// scan that follows reconciles over this, so the cache only ever
+    /// shortens the blank period; it never decides what the library holds.
+    /// </summary>
+    private void SeedLibraryFromCache()
+    {
+        Dispatcher.UIThread.VerifyAccess();
+
+        if (_allGames.Count != 0)
+        {
+            return;
+        }
+
+        var cached = GameLibraryCache.Load(_settings.GameFolders.ToArray());
+        if (cached.Count == 0)
+        {
+            return;
+        }
+
+        _allGames.AddRange(cached);
+        RefreshVisibleGames(new HashSet<GameEntry>(cached));
+        LoadGameDetailsInBackground(cached, cached);
+    }
+
     private async Task RescanLibraryAsync(bool showProgress = true)
     {
         Dispatcher.UIThread.VerifyAccess();
@@ -1576,6 +1603,7 @@ public partial class MainWindow : Window
         LoadingState.IsVisible = false;
         LoadGameDetailsInBackground(reconciliation.CoversToLoad, reconciliation.Games);
         UpdateDiscordPresence();
+        GameLibraryCache.Save(folders, reconciliation.Games);
     }
 
     /// <summary>
