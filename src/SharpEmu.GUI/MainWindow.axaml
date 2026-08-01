@@ -1220,8 +1220,13 @@ SPDX-License-Identifier: GPL-2.0-or-later
                     <StackPanel Spacing="8">
                       <!--Latest commit info-->
                       <Border Classes="optionsInfoRow">
-                        <Grid ColumnDefinitions="*,Auto" ColumnSpacing="18">
-                          <StackPanel VerticalAlignment="Center">
+                        <Grid ColumnDefinitions="Auto,*,Auto" ColumnSpacing="18">
+                               <Image Grid.Column="0"
+                                 Source="avares://SharpEmu.GUI/Assets/commit-icon.png"
+                                 Width="20" Height="20"
+                                 VerticalAlignment="Center"
+                                 Margin="0,0,12,0" />
+                          <StackPanel Grid.Column="1" VerticalAlignment="Center">
                             <TextBlock x:Name="LatestCommitLabel"
                                        Text="{Binding [About.Github.LatestCommitLabel], Source={x:Static local:Localization.Instance}}"
                                        FontSize="14"
@@ -1232,7 +1237,7 @@ SPDX-License-Identifier: GPL-2.0-or-later
                                        Foreground="{StaticResource SettingsDescriptionBrush}"
                                        TextWrapping="Wrap" />
                           </StackPanel>
-                          <Button Grid.Column="1"
+                          <Button Grid.Column="2"
                                   x:Name="LatestCommitHashText"
                                   Classes="optionAction"
                                   Content="Loading…"
@@ -1245,8 +1250,13 @@ SPDX-License-Identifier: GPL-2.0-or-later
 
                       <!--Update-->
                       <Border Classes="optionsInfoRow">
-                        <Grid ColumnDefinitions="*,Auto" ColumnSpacing="18">
-                          <StackPanel VerticalAlignment="Center">
+                        <Grid ColumnDefinitions="Auto,*,Auto" ColumnSpacing="18">
+                               <Image Grid.Column="0"
+                                 Source="avares://SharpEmu.GUI/Assets/update-icon.png"
+                                 Width="20" Height="20"
+                                 VerticalAlignment="Center"
+                                 Margin="0,0,12,0" />
+                          <StackPanel Grid.Column="1" VerticalAlignment="Center">
                             <TextBlock x:Name="UpdateLabel"
                                        Text="{Binding [Updater.Label], Source={x:Static local:Localization.Instance}}"
                                        FontSize="14"
@@ -1257,7 +1267,7 @@ SPDX-License-Identifier: GPL-2.0-or-later
                                        Foreground="{StaticResource SettingsDescriptionBrush}"
                                        TextWrapping="Wrap" />
                           </StackPanel>
-                          <Button Grid.Column="1"
+                          <Button Grid.Column="2"
                                   x:Name="UpdateButton"
                                   Classes="optionAction"
                                   Content="Check for updates"
@@ -1267,8 +1277,13 @@ SPDX-License-Identifier: GPL-2.0-or-later
                       
                       <!--Github-->
                       <Border Classes="optionsInfoRow">
-                        <Grid ColumnDefinitions="*,Auto" ColumnSpacing="18">
-                          <StackPanel VerticalAlignment="Center">
+                        <Grid ColumnDefinitions="Auto,*,Auto" ColumnSpacing="18">
+                               <Image Grid.Column="0"
+                                 Source="avares://SharpEmu.GUI/Assets/github.png"
+                                 Width="20" Height="20"
+                                 VerticalAlignment="Center"
+                                 Margin="0,0,12,0" />
+                          <StackPanel Grid.Column="1" VerticalAlignment="Center">
                             <TextBlock x:Name="GithubLabel"
                                        Text="{Binding [About.Github.Label], Source={x:Static local:Localization.Instance}}"
                                        FontSize="14"
@@ -1279,7 +1294,7 @@ SPDX-License-Identifier: GPL-2.0-or-later
                                        Foreground="{StaticResource SettingsDescriptionBrush}"
                                        TextWrapping="Wrap" />
                           </StackPanel>
-                          <Button Grid.Column="1"
+                          <Button Grid.Column="2"
                                   x:Name="GithubButton"
                                   Classes="optionAction"
                                   Content="{Binding [About.GithubButton], Source={x:Static local:Localization.Instance}}"
@@ -1289,8 +1304,13 @@ SPDX-License-Identifier: GPL-2.0-or-later
 
                       <!--Discord-->
                       <Border Classes="optionsInfoRow">
-                        <Grid ColumnDefinitions="*,Auto" ColumnSpacing="18">
-                          <StackPanel VerticalAlignment="Center">
+                        <Grid ColumnDefinitions="Auto,*,Auto" ColumnSpacing="18">
+                               <Image Grid.Column="0"
+                                 Source="avares://SharpEmu.GUI/Assets/discord.png"
+                                 Width="20" Height="20"
+                                 VerticalAlignment="Center"
+                                 Margin="0,0,12,0" />
+                          <StackPanel Grid.Column="1" VerticalAlignment="Center">
                             <TextBlock x:Name="DiscordServerLabel"
                                       Text="{Binding [About.Discord.Label], Source={x:Static local:Localization.Instance}}"
                                       FontSize="14"
@@ -1301,7 +1321,7 @@ SPDX-License-Identifier: GPL-2.0-or-later
                                       Foreground="{StaticResource SettingsDescriptionBrush}"
                                       TextWrapping="Wrap" />
                           </StackPanel>
-                          <TextBlock Grid.Column="1"
+                          <TextBlock Grid.Column="2"
                                      x:Name="DiscordComingSoonText"
                                      Text="{Binding [About.DiscordComingSoon], Source={x:Static local:Localization.Instance}}"
                                      FontSize="12"
