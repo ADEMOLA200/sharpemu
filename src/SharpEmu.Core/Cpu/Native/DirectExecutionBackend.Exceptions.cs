@@ -317,9 +317,11 @@ public sealed partial class DirectExecutionBackend
 
 			DumpPointerWindow("fault-register-rbx", rbx, 0x60);
 			DumpPointerWindow("fault-register-rsi", rsi, 0x60);
+			DumpPointerWindow("fault-register-rcx", rcx, 0x80);
 			DumpPointerWindow("fault-register-rdi", rdi, 0x60);
 			DumpPointerWindow("fault-register-r13", r13, 0x60);
 			DumpPointerWindow("fault-register-r14", r14, 0x60);
+
 
 			try
 			{
@@ -1233,17 +1235,15 @@ public sealed partial class DirectExecutionBackend
 		}
 	}
 
-	private static bool TryReadHostQword(ulong address, out ulong value)
+	private unsafe static bool TryReadHostQword(ulong address, out ulong value)
 	{
+		value = 0;
+		if (address < 65536) return false;
 		if (!OperatingSystem.IsWindows())
 		{
-			// A stray read inside the signal handler would raise a nested
-			// SIGSEGV and kill the process before diagnostics finish, so
-			// probe the region table instead of relying on try/catch.
 			return TryReadStackU64(address, out value);
 		}
 
-		value = 0;
 		try
 		{
 			value = (ulong)Marshal.ReadInt64((nint)address);
@@ -1262,9 +1262,8 @@ public sealed partial class DirectExecutionBackend
 			return false;
 		}
 
-		if (!OperatingSystem.IsWindows())
+		if (OperatingSystem.IsWindows())
 		{
-			// See TryReadHostQword: probe every touched page before reading.
 			ulong end = address + (ulong)buffer.Length;
 			for (ulong page = address & 0xFFFFFFFFFFFFF000uL; page < end; page += 4096)
 			{
@@ -1453,6 +1452,7 @@ public sealed partial class DirectExecutionBackend
 			}
 
 			TryCommitRange(pageBase + 4096, 4096uL, commitProtect);
+			RescanTlsPatternsIfExecutable(committedBase, committedSize + 4096uL, commitProtect);
 			if (traceLazyCommit)
 			{
 				Console.Error.WriteLine($"[LOADER][TRACE] lazy-reserve-commit#{traceIndex}: addr=0x{committedBase:X16} size=0x{committedSize:X16} access={accessType} protect=0x{commitProtect:X8}");
@@ -1512,6 +1512,7 @@ public sealed partial class DirectExecutionBackend
 		}
 
 		TryCommitRange(pageBase + 4096, 4096uL, commitProtect);
+		RescanTlsPatternsIfExecutable(committedBase, committedSize + 4096uL, commitProtect);
 		if (traceLazyCommit)
 		{
 			Console.Error.WriteLine($"[LOADER][TRACE] lazy-commit#{traceIndex}: addr=0x{committedBase:X16} size=0x{committedSize:X16} access={accessType} protect=0x{commitProtect:X8}");
@@ -1611,6 +1612,18 @@ public sealed partial class DirectExecutionBackend
 				_ => false
 			};
 		}
+	}
+
+	// Re-scans a just-committed window for FS:[0] TLS loads; skips non-executable commits.
+	private unsafe void RescanTlsPatternsIfExecutable(ulong committedBase, ulong committedSize, uint commitProtect)
+	{
+		const uint executableProtectionMask = PAGE_EXECUTE | PAGE_EXECUTE_READ | PAGE_EXECUTE_READWRITE | PAGE_EXECUTE_WRITECOPY;
+		if ((commitProtect & executableProtectionMask) == 0 || committedSize == 0)
+		{
+			return;
+		}
+
+		PatchTlsPatternsInRange(committedBase, committedBase + committedSize, announce: false);
 	}
 
 	private static bool ShouldTraceLazyCommit(int traceIndex)

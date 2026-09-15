@@ -59,10 +59,12 @@ internal static class GpuWaitRegistry
     // cycle forever even though a real producer did signal it. Keyed by (memory,
     // address) so distinct guest processes never alias.
     private static readonly Dictionary<(object, ulong), ulong> _lastProduced = new();
+    // Frame-staleness guard: tracks the frame ID of each label write so that
+    // WAIT_REG_MEM in frame N+1 is not satisfied by a stale write from frame N.
+    private static readonly Dictionary<(object, ulong), long> _labelFrameIds = new();
+    private static long _currentFrameId;
 
-    // Unwraps to the shared root: per-thread TrackedCpuMemory decorators
-    // over ONE virtual memory are not reference-equal, so a raw-reference
-    // filter would make waits invisible across threads.
+  
     private static object? Canonicalize(object? memory)
     {
         while (memory is SharpEmu.HLE.ICpuMemoryWrapper wrapper)
@@ -71,6 +73,34 @@ internal static class GpuWaitRegistry
         }
 
         return memory;
+    }
+
+    /// <summary>
+    /// Advances the frame counter. Called at each frame boundary (flip) so that
+    /// stale label writes from previous frames cannot satisfy WAIT_REG_MEM.
+    /// </summary>
+    public static void AdvanceFrame()
+    {
+        System.Threading.Interlocked.Increment(ref _currentFrameId);
+    }
+
+    /// <summary>
+    /// Returns true if the label at (memory, address) was written in the
+    /// current frame, or has never been written (uninitialized).
+    /// Only labels written in a PREVIOUS frame are considered stale.
+    /// </summary>
+    public static bool IsLabelFresh(object memory, ulong address)
+    {
+        memory = Canonicalize(memory)!;
+        lock (_gate)
+        {
+            if (!_labelFrameIds.TryGetValue((memory, address), out var frameId))
+            {
+                return true; // never written — treat as fresh (not stale)
+            }
+
+            return frameId >= System.Threading.Volatile.Read(ref _currentFrameId);
+        }
     }
 
     public static int Count
@@ -120,6 +150,7 @@ internal static class GpuWaitRegistry
     /// </summary>
     public static OutstandingSnapshot SnapshotOutstanding(object? memory = null)
     {
+        memory = Canonicalize(memory);
         lock (_gate)
         {
             var outstanding = 0;
@@ -346,6 +377,7 @@ internal static class GpuWaitRegistry
     /// </summary>
     public static bool LatchSatisfiedByValue(object memory, ulong address, ulong value)
     {
+        memory = Canonicalize(memory)!;
         var latchedAny = false;
         lock (_gate)
         {
@@ -431,6 +463,7 @@ internal static class GpuWaitRegistry
     /// </summary>
     public static List<WaitingDcb>? CollectExpiredRetries(object memory, long nowTicks)
     {
+        memory = Canonicalize(memory)!;
         List<WaitingDcb>? expired = null;
         lock (_gate)
         {
@@ -473,6 +506,7 @@ internal static class GpuWaitRegistry
 
     public static List<WaitingDcb>? CollectAllForMemory(object memory)
     {
+        memory = Canonicalize(memory)!;
         List<WaitingDcb>? collected = null;
         lock (_gate)
         {
@@ -558,6 +592,7 @@ internal static class GpuWaitRegistry
     /// breaker. Also latches any already-waiting waiter it satisfies.</summary>
     public static bool RecordProduced(object memory, ulong address, ulong value)
     {
+        memory = Canonicalize(memory)!;
         lock (_gate)
         {
             if (_lastProduced.Count >= 8192)
@@ -573,6 +608,7 @@ internal static class GpuWaitRegistry
             }
 
             _lastProduced[(memory, address)] = value;
+            _labelFrameIds[(memory, address)] = System.Threading.Volatile.Read(ref _currentFrameId);
         }
 
         return LatchSatisfiedByValue(memory, address, value);
@@ -591,6 +627,7 @@ internal static class GpuWaitRegistry
         long nowTicks,
         long minAgeTicks)
     {
+        memory = Canonicalize(memory)!;
         List<WaitingDcb>? broken = null;
         lock (_gate)
         {

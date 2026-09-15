@@ -43,6 +43,7 @@
   "Options.Env.Group.General": "Général",
   "Options.Env.RenderDoc.Desc": "Charge l'API in-application de RenderDoc afin de capturer des images depuis l'émulateur.\nAppuyez sur F10 pendant le jeu pour capturer une image ; les captures sont écrites dans user/logs/capture_logs/<TITLE_ID>.\nNécessite l'installation de RenderDoc. Ralentit le GPU et bloque certains jeux : laissez cette option désactivée sauf en cas de débogage.",
   "Options.Env.GuestImageCpuSync.Desc": "Recharger les surfaces invité que le code CPU du jeu réécrit lui-même.\nLaisser désactivé normalement. Activer pour les titres dont les surfaces dessinées par le CPU n'atteignent jamais l'écran.\nCoûte des performances et provoque des régressions sur certains titres, comme GTA V.",
+  "Options.Env.ForceSubmitOrphanPreambles.Desc": "Soumettre les préambules de tampon de commandes GPU même quand leur file cible ne les récupère jamais.\nLaisser désactivé normalement. Activer pour les titres qui se figent en attendant une fence GPU qui ne se déclenche jamais.",
   "Options.Section.Emulation": "ÉMULATION",
   "Options.Section.Logging": "JOURNALISATION",
   "Options.Section.Launcher": "LANCEUR",
@@ -152,7 +153,7 @@
   "About.Discord.Label": "Discord",
   "About.Discord.Desc": "Rejoignez la communauté, obtenez de l’aide et suivez le développement.",
   "About.GithubButton": "Contribuer sur GitHub !",
-  "About.DiscordComingSoon": "Bientôt disponible",
+  "About.DiscordButton": "Rejoignez notre Discord !",
 
   "Library.Context.GameSettings": "Paramètres du jeu…",
   "Options.Env.WritableApp0.Desc": "Autoriser les jeux à créer et écrire des fichiers dans leur dossier d’installation.\nNécessaire pour les dumps non empaquetés qui écrivent leurs sauvegardes ou leur configuration sous /app0.",

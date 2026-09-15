@@ -12,6 +12,112 @@ namespace SharpEmu.ShaderCompiler;
 public static class Gen5ShaderTranslator
 {
     private static int _dppVectorsValidated;
+
+    /// <summary>
+    /// Finds the user SGPR that an embedded vertex-fetch prolog adds to its
+    /// vertex index. PS5 NGG shaders use v5 and V_SAD_U32; legacy fetch
+    /// shaders use v0 and V_ADD_I32. Only instructions before the first fetch
+    /// qualify, and conflicting candidates fail closed.
+    /// </summary>
+    public static bool TryGetEmbeddedFetchVertexOffsetRegister(
+        Gen5ShaderProgram program,
+        uint userDataBase,
+        int userDataCount,
+        out uint register)
+    {
+        register = 0;
+        uint? candidate = null;
+        foreach (var instruction in program.Instructions)
+        {
+            if (instruction.Control is Gen5BufferMemoryControl)
+            {
+                break;
+            }
+
+            if (instruction.Destinations.Count == 0 ||
+                instruction.Destinations[0] is not
+                    { Kind: Gen5OperandKind.VectorRegister } destination)
+            {
+                continue;
+            }
+
+            var accumulator = destination.Value;
+            var isLegacyAdd =
+                accumulator == 0 &&
+                instruction.Opcode == "VAddI32" &&
+                instruction.Sources.Count >= 2 &&
+                instruction.Sources[1] is
+                    { Kind: Gen5OperandKind.VectorRegister, Value: 0 };
+            var isNggSad =
+                userDataBase == 8 &&
+                accumulator == 5 &&
+                instruction.Opcode == "VSadU32" &&
+                instruction.Sources.Count >= 3 &&
+                instruction.Sources[2] is
+                    { Kind: Gen5OperandKind.VectorRegister, Value: 5 } &&
+                TryGetInlineConstant(instruction.Sources[1], out var sadValue) &&
+                sadValue == 0;
+            if ((!isLegacyAdd && !isNggSad) ||
+                instruction.Sources[0] is not
+                    { Kind: Gen5OperandKind.ScalarRegister } scalar ||
+                scalar.Value < userDataBase ||
+                scalar.Value - userDataBase >= userDataCount)
+            {
+                continue;
+            }
+
+            if (candidate.HasValue && candidate.Value != scalar.Value)
+            {
+                return false;
+            }
+
+            candidate = scalar.Value;
+        }
+
+        if (!candidate.HasValue)
+        {
+            return false;
+        }
+
+        register = candidate.Value;
+        return true;
+    }
+
+    public static bool TryGetEmbeddedFetchVertexOffset(
+        Gen5ShaderState state,
+        out int offset)
+    {
+        offset = 0;
+        if (!TryGetEmbeddedFetchVertexOffsetRegister(
+                state.Program,
+                state.UserDataScalarRegisterBase,
+                state.UserData.Count,
+                out var register))
+        {
+            return false;
+        }
+
+        var userDataIndex = register - state.UserDataScalarRegisterBase;
+        offset = unchecked((int)state.UserData[(int)userDataIndex]);
+        return true;
+    }
+
+    private static bool TryGetInlineConstant(Gen5Operand operand, out uint value)
+    {
+        if (operand.Kind == Gen5OperandKind.LiteralConstant)
+        {
+            value = operand.Value;
+            return true;
+        }
+
+        if (operand.Kind == Gen5OperandKind.EncodedConstant)
+        {
+            return Gen5InlineConstants.TryDecode(operand.Value, out value);
+        }
+
+        value = 0;
+        return false;
+    }
     /// <summary>
     /// Bitmask (256 bits) of scalar registers whose values the program can
     /// observe: scalar source operands (widened for 64-bit pairs), the
@@ -947,6 +1053,7 @@ public static class Gen5ShaderTranslator
             0x42 => "VMovreldB32",
             0x43 => "VMovrelsB32",
             0x44 => "VMovrelsdB32",
+            0x48 => "VMovrelsd2B32",
             _ => string.Empty,
         };
 
@@ -1014,6 +1121,12 @@ public static class Gen5ShaderTranslator
             0x2F => "VCvtPkrtzF16F32",
             0x30 => "VCvtPkU16U32",
             0x31 => "VCvtPkI16I32",
+            0x32 => "VAddF16",
+            0x33 => "VSubF16",
+            0x34 => "VSubrevF16",
+            0x35 => "VMulF16",
+            0x39 => "VMaxF16",
+            0x3A => "VMinF16",
             _ => string.Empty,
         };
 
@@ -1085,6 +1198,14 @@ public static class Gen5ShaderTranslator
             0xC5 => "VCmpNeU32",
             0xC6 => "VCmpGeU32",
             0xC7 => "VCmpTU32",
+            0xC8 => "VCmpFF16",
+            0xC9 => "VCmpLtF16",
+            0xCA => "VCmpEqF16",
+            0xCB => "VCmpLeF16",
+            0xCC => "VCmpGtF16",
+            0xCD => "VCmpLgF16",
+            0xCE => "VCmpGeF16",
+            0xCF => "VCmpOF16",
             0xD0 => "VCmpxFU32",
             0xD1 => "VCmpxLtU32",
             0xD2 => "VCmpxEqU32",
@@ -1093,6 +1214,30 @@ public static class Gen5ShaderTranslator
             0xD5 => "VCmpxNeU32",
             0xD6 => "VCmpxGeU32",
             0xD7 => "VCmpxTU32",
+            0xD8 => "VCmpxFF16",
+            0xD9 => "VCmpxLtF16",
+            0xDA => "VCmpxEqF16",
+            0xDB => "VCmpxLeF16",
+            0xDC => "VCmpxGtF16",
+            0xDD => "VCmpxLgF16",
+            0xDE => "VCmpxGeF16",
+            0xDF => "VCmpxOF16",
+            0xE8 => "VCmpUF16",
+            0xE9 => "VCmpNgeF16",
+            0xEA => "VCmpNlgF16",
+            0xEB => "VCmpNgtF16",
+            0xEC => "VCmpNleF16",
+            0xED => "VCmpNeqF16",
+            0xEE => "VCmpNltF16",
+            0xEF => "VCmpTruF16",
+            0xF8 => "VCmpxUF16",
+            0xF9 => "VCmpxNgeF16",
+            0xFA => "VCmpxNlgF16",
+            0xFB => "VCmpxNgtF16",
+            0xFC => "VCmpxNleF16",
+            0xFD => "VCmpxNeqF16",
+            0xFE => "VCmpxNltF16",
+            0xFF => "VCmpxTruF16",
             _ => string.Empty,
         };
 
@@ -2148,7 +2293,11 @@ public static class Gen5ShaderTranslator
             {
                 var extra = words[1];
                 var vectorAddress = extra & 0xFF;
-                var vectorData = (extra >> 8) & 0xFF;
+                // FLAT/GLOBAL encodes the load destination in the high byte
+                // of the second dword.  MUBUF uses bits [15:8] instead, so
+                // sharing that extraction here silently clobbers the wrong
+                // VGPR range for GLOBAL_LOAD_* instructions.
+                var vectorData = (extra >> 24) & 0xFF;
                 var scalarAddress = (extra >> 16) & 0x7F;
                 var usesFlatAddress = opcode.StartsWith(
                     "Flat",

@@ -118,6 +118,29 @@ public static partial class AgcExports
     // Multiple producers can share one target label; last-writer-wins would
     // starve waits on the others.
     private static readonly Dictionary<ulong, List<ulong>> _cbReleaseMemTargets = new();
+    // CMASK meta-state tracking: maps colour-buffer addresses to their
+    // compression metadata.  Keyed by colour-buffer base address so the
+    // consumption path (which only knows the surface address) can query
+    // directly without a reverse lookup.
+    private record struct MetaSurfaceInfo(
+        ulong CmaskAddress,
+        uint ClearWord0,
+        uint ClearWord1,
+        bool IsCleared);
+    private static readonly Dictionary<ulong, MetaSurfaceInfo> _metaSurfaces = new();
+    // Reverse map: CMASK address → colour-buffer address.  Needed so
+    // CheckCmaskWrite (which only sees the write target address) can
+    // find the owning surface.
+    private static readonly Dictionary<ulong, ulong> _cmaskToColorBuffer = new();
+    // Guards _metaSurfaces and _cmaskToColorBuffer.  Two threads touch them:
+    // the parse thread (registration in TrackCmaskAddresses, CheckCmaskWrite
+    // from DMA/compute writes, EFC consumption) and the render thread
+    // (MarkAllSurfacesCleared at guest flip, IsMetaClearedForSurface /
+    // ConsumeMetaClear / GetMetaClearValue at pass-record time).  Plain
+    // Dictionaries corrupt under concurrent write, so every access below
+    // holds this gate.  Keep the critical sections tiny and never block on
+    // anything external while holding it.
+    private static readonly object _metaSurfaceGate = new();
     // header -> {ring base, write cursor} of the last submitted slice.
     // Submissions stay cursor-bounded since rings aren't zeroed. Lap
     // distinguishes a stale cursor from a previous pass over the same base.
@@ -1095,15 +1118,20 @@ public static partial class AgcExports
     private const uint CbColor0Base = 0x318;
     private const uint CbColorRegisterStride = 15;
     private const uint CbColor0Info = 0x31C;
+    private const uint CbColor0Cmask = 0x31F;
     private const uint CbColor0ClearWord0 = 0x323;
     private const uint CbColor0ClearWord1 = 0x324;
+    private const uint CbColor0DccBase = 0x325;
     private const uint CbColor0BaseExt = 0x390;
+    private const uint CbColor0CmaskBaseExt = 0x398;
+    private const uint CbColor0DccBaseExt = 0x3A8;
     private const uint CbColor0Attrib2 = 0x3B0;
     private const uint CbColor0Attrib3 = 0x3B8;
     // CB_COLORn_INFO.DCC_ENABLE (gc_10_1_0_sh_mask.h). On GFX10 the legacy
     // FAST_CLEAR and COMPRESSION bits stay clear because DCC, not CMASK,
     // carries the compression.
     private const uint CbColorInfoDccEnableMask = 1u << 28;
+    private const uint CbColorInfoFastClearEnableMask = 1u << 12;
     private const uint CbBlend0Control = 0x1E0;
     private const uint PaScModeCntl0 = 0x292;
     // GFX10 DB context registers (register byte address minus 0x28000, / 4).
@@ -1123,8 +1151,8 @@ public static partial class AgcExports
     private const uint EsUserDataRegister = 0xCC;
     private const uint ComputeUserDataRegister = 0x240;
     private const uint NggUserDataScalarRegisterBase = 8;
-    private const uint Gen5TextureFormatR8G8B8A8Unorm = 10;
-    private const uint Gen5TextureFormatR16G16B16A16Float = 12;
+    internal const uint Gen5TextureFormatR8G8B8A8Unorm = 10;
+    internal const uint Gen5TextureFormatR16G16B16A16Float = 12;
     private const uint Gen5TextureType1D = 8;
     private const uint Gen5TextureType2D = 9;
     private const uint Gen5TextureType3D = 10;
@@ -1460,6 +1488,7 @@ public static partial class AgcExports
         uint VertexCount,
         uint InstanceCount,
         int BaseVertex,
+        int VertexBufferBaseVertex,
         GuestIndexBuffer? IndexBuffer,
         IReadOnlyList<TranslatedImageBinding> Textures,
         IReadOnlyList<Gen5GlobalMemoryBinding> GlobalMemoryBindings,
@@ -2075,6 +2104,42 @@ public static partial class AgcExports
         TraceAgc(
             $"agc.create_prim_state cx=0x{cxRegistersAddress:X16} uc=0x{ucRegistersAddress:X16} " +
             $"hull=0x{hullShaderAddress:X16} gs=0x{geometryShaderAddress:X16} type={shaderType} prim=0x{primitiveType:X8}");
+        ctx[CpuRegister.Rax] = 0;
+        return (int)OrbisGen2Result.ORBIS_GEN2_OK;
+    }
+
+    // Symbol name unconfirmed (not in ps5_names.txt); resolved from the
+    // decrypted eboot's call site only. On Ghost of Yotei, the caller scans
+    // this same buffer right after sceAgcCreatePrimState for 32 (offset,value)
+    // pairs (a hardcoded size, not read from any header) and open-address-
+    // probes them as a register hash table -- an out-of-bounds probe index
+    // sourced from an unwritten pair was the AV. CreatePrimState only
+    // populates the first 3 pairs; zero the rest of the scanned window so
+    // every unpopulated slot is a harmless failed probe instead of
+    // guest-stack garbage.
+    [SysAbiExport(
+        Nid = "dbOlWdppb4o",
+        ExportName = "sceAgcAddPrimStateRegisters",
+        Target = Generation.Gen5,
+        LibraryName = "libSceAgc")]
+    public static int AddPrimStateRegisters(CpuContext ctx)
+    {
+        var ucRegistersAddress = ctx[CpuRegister.Rdi];
+        if (ucRegistersAddress == 0)
+        {
+            return SetReturn(ctx, OrbisGen2Result.ORBIS_GEN2_ERROR_INVALID_ARGUMENT);
+        }
+
+        const int prefilledPairBytes = 3 * 8; // sceAgcCreatePrimState's 3 (offset,value) pairs
+        const int scannedTableBytes = 0x20 * 8; // caller's hardcoded probe-window size
+        Span<byte> zero = stackalloc byte[scannedTableBytes - prefilledPairBytes];
+        zero.Clear();
+        if (!ctx.Memory.TryWrite(ucRegistersAddress + prefilledPairBytes, zero))
+        {
+            return SetReturn(ctx, OrbisGen2Result.ORBIS_GEN2_ERROR_MEMORY_FAULT);
+        }
+
+        TraceAgc($"agc.add_prim_state_registers uc=0x{ucRegistersAddress:X16}");
         ctx[CpuRegister.Rax] = 0;
         return (int)OrbisGen2Result.ORBIS_GEN2_OK;
     }
@@ -2855,6 +2920,25 @@ public static partial class AgcExports
         DcbSetRegistersIndirect(ctx, RShRegsIndirect, "sh");
 
     [SysAbiExport(
+        Nid = "pFLArOT53+w",
+        ExportName = "sceAgcDcbSetShRegisterDirect",
+        Target = Generation.Gen5,
+        LibraryName = "libSceAgc")]
+    public static int DcbSetShRegisterDirect(CpuContext ctx) =>
+        DcbSetRegisterDirect(ctx, ItSetShReg, "sh");
+
+    [SysAbiExport(
+        Nid = "QhPDD513V0w",
+        ExportName = "sceAgcDcbSetShRegisterDirectGetSize",
+        Target = Generation.Gen5,
+        LibraryName = "libSceAgc")]
+    public static int DcbSetShRegisterDirectGetSize(CpuContext ctx)
+    {
+        ctx[CpuRegister.Rax] = 3u * sizeof(uint);
+        return (int)ctx[CpuRegister.Rax];
+    }
+
+    [SysAbiExport(
         Nid = "hvUfkUIQcOE",
         ExportName = "sceAgcDcbSetUcRegistersIndirect",
         Target = Generation.Gen5,
@@ -3497,6 +3581,23 @@ public static partial class AgcExports
         }
 
         return ReturnPointer(ctx, commandAddress);
+    }
+
+    [SysAbiExport(
+        Nid = "43WJ08sSugE",
+        ExportName = "sceAgcDcbWaitOnAddressGetSize",
+        Target = Generation.Gen5,
+        LibraryName = "libSceAgc")]
+    public static int DcbWaitOnAddressGetSize(CpuContext ctx)
+    {
+        var size = (uint)ctx[CpuRegister.Rdi];
+        ctx[CpuRegister.Rax] = size switch
+        {
+            0 => 14u * sizeof(uint),
+            1 => 16u * sizeof(uint),
+            _ => 0,
+        };
+        return (int)ctx[CpuRegister.Rax];
     }
 
     [SysAbiExport(
@@ -5047,6 +5148,10 @@ public static partial class AgcExports
 
             if (op == ItNop && register == RDmaData && length >= 7)
             {
+                // Ensure CMASK addresses are tracked before DMA fills
+                var tempTargets = GetRenderTargets(state.CxRegisters);
+                TrackCmaskAddresses(state.CxRegisters, tempTargets);
+
                 ApplySubmittedDmaData(
                     ctx,
                     gpuState,
@@ -5207,6 +5312,7 @@ public static partial class AgcExports
             {
                 TraceFramePacketSummary(state);
                 SyncCpuWrittenGuestImages(ctx);
+                GpuWaitRegistry.AdvanceFrame();
                 if (!TryReadUInt32(ctx, currentAddress + 4, out var videoOutHandle) ||
                     !TryReadUInt32(ctx, currentAddress + 8, out var displayBufferIndexRaw) ||
                     !TryReadUInt32(ctx, currentAddress + 12, out var flipMode) ||
@@ -5235,7 +5341,9 @@ public static partial class AgcExports
                     var globalMemoryBuffers =
                         CreateTranslatedDrawGlobalBuffers(pendingComposite);
                     var vertexBuffers =
-                        CreateGuestVertexBuffers(pendingComposite.VertexInputs);
+                        CreateGuestVertexBuffers(
+                            pendingComposite.VertexInputs,
+                            pendingComposite.VertexBufferBaseVertex);
                     ProvideRenderTargetInitialData(ctx, pendingDisplayTarget);
                     GuestGpu.Current.SubmitOffscreenTranslatedDraw(
                         pendingComposite.PixelShader,
@@ -6228,6 +6336,13 @@ public static partial class AgcExports
         ulong byteCount,
         uint? fillValue)
     {
+        // Check if this DMA write targets a CMASK address (shadPS4's FillBuffer
+        // logic: when a buffer fill targets CMASK metadata, mark it as "all clear")
+        if (fillValue is { } fillVal && fillVal == 0)
+        {
+            CheckCmaskWrite(destinationAddress, null);
+        }
+
         var hasImage = GuestGpu.Current.TryGetGuestImageExtent(
             destinationAddress,
             out var width,
@@ -6442,6 +6557,25 @@ public static partial class AgcExports
                     var targetAddress = destinationAddress +
                         (incrementAddress ? (ulong)index * sizeof(uint) : 0);
                     wroteData = TryWriteUInt32(ctx, targetAddress, values[index]);
+                    if (wroteData)
+                    {
+                        GpuWaitRegistry.RecordProduced(
+                            ctx.Memory, targetAddress, values[index]);
+                    }
+                }
+
+                // Like ReleaseMem dataSel=2: a 64-bit WAIT_REG_MEM watches an
+                // 8-byte label written as two 32-bit dwords. Record the combined
+                // 64-bit value so a 64-bit EQ can latch even though the writes
+                // landed as two 32-bit stores.
+                if (wroteData && dwordCount >= 2 && incrementAddress)
+                {
+                    var combined = ((ulong)values[1] << 32) | values[0];
+                    GpuWaitRegistry.RecordProduced(
+                        ctx.Memory, destinationAddress, combined);
+                    // Also latch the high half's address for symmetry: a stray
+                    // 32-bit wait on the high dword should not be confused, but
+                    // recording it does not hurt and mirrors the per-dword stores.
                 }
 
                 if (tracePacket)
@@ -7017,7 +7151,13 @@ public static partial class AgcExports
 
         if (hasCurrent && GpuWaitRegistry.Compare(waiter, currentValue))
         {
-            return false; // already satisfied — keep parsing
+            // Value satisfies the condition, but only bypass if the label was
+            // written in the current frame. A stale label from a previous frame
+            // means the producer hasn't written yet this frame — must wait.
+            if (GpuWaitRegistry.IsLabelFresh(ctx.Memory, waitAddress))
+            {
+                return false; // satisfied by current-frame write — keep parsing
+            }
         }
 
         if (!_gpuWaitSuspendEnabled)
@@ -8008,7 +8148,8 @@ public static partial class AgcExports
         var hasPsInputEna = state.CxRegisters.TryGetValue(SpiPsInputEna, out var psInputEna);
         var hasPsInputAddr = state.CxRegisters.TryGetValue(SpiPsInputAddr, out var psInputAddr);
         state.UcRegisters.TryGetValue(VgtPrimitiveType, out var primitiveType);
-        var renderTargets = GetRenderTargets(state.CxRegisters);
+var renderTargets = GetRenderTargets(state.CxRegisters);
+        TrackCmaskAddresses(state.CxRegisters, renderTargets);
         var drawSequence = ++gpuState.WorkSequence;
         if (state.PendingTargetlessDraw is { } stalePendingDraw)
         {
@@ -8028,6 +8169,31 @@ public static partial class AgcExports
         if (TryGetCbColorControlMode(state.CxRegisters, out var cbMode) &&
             IsCbMetadataColorMode(cbMode))
         {
+            // EliminateFastClear: the game explicitly asks the CB to clear
+            // the fast-clear metadata and the colour buffer.
+            if (cbMode == (uint)CbColorMode.EliminateFastClear &&
+                renderTargets.Count > 0 &&
+                renderTargets[0].Address != 0)
+            {
+                var targetAddr = renderTargets[0].Address;
+                bool requestClear;
+                lock (_metaSurfaceGate)
+                {
+                    requestClear =
+                        _metaSurfaces.TryGetValue(targetAddr, out var meta) &&
+                        meta.IsCleared;
+                    if (requestClear)
+                    {
+                        _metaSurfaces[targetAddr] = meta with { IsCleared = false };
+                    }
+                }
+
+                if (requestClear)
+                {
+                    VulkanVideoPresenter.RequestGuestColorClear(targetAddr);
+                }
+            }
+
             if (_traceAgcShader || ShouldTraceHotPath(ref _cbMetadataSkipTraceCount))
             {
                 TraceAgcShader(
@@ -8105,7 +8271,9 @@ public static partial class AgcExports
             var globalMemoryBuffers =
                 CreateTranslatedDrawGlobalBuffers(depthOnlyDraw);
             var vertexBuffers =
-                CreateGuestVertexBuffers(depthOnlyDraw.VertexInputs);
+                CreateGuestVertexBuffers(
+                    depthOnlyDraw.VertexInputs,
+                    depthOnlyDraw.VertexBufferBaseVertex);
             var renderState = depthOnlyDraw.RenderState;
             if (activeDepthTarget.ReadOnly && renderState.Depth.WriteEnable)
             {
@@ -8242,6 +8410,34 @@ public static partial class AgcExports
                 return;
             }
 
+            // DbRenderControl CLEARON (bit0): when set, the CB clears color
+            // targets on first draw. Handle color targets (depth is already
+            // handled by DecodeDepthState).
+            if (state.CxRegisters.TryGetValue(DbRenderControl, out var rc) && (rc & 0x1u) != 0)
+            {
+                foreach (var rt in translatedDraw.RenderTargets)
+                {
+                    if (rt.Address != 0)
+                    {
+                        VulkanVideoPresenter.RequestGuestColorClear(rt.Address);
+                    }
+                }
+            }
+
+            // CMASK fast clear: CB_COLORn_INFO.FAST_CLEAR (bit12) set on
+            // one or more targets. The CB clears via CMASK before the draw
+            // writes; mark targets for clear-on-first-use.
+            if (IsCmaskFastClearDraw(state.CxRegisters, translatedDraw.RenderTargets))
+            {
+                foreach (var rt in translatedDraw.RenderTargets)
+                {
+                    if (rt.Address != 0)
+                    {
+                        VulkanVideoPresenter.RequestGuestColorClear(rt.Address);
+                    }
+                }
+            }
+
             var firstTarget = translatedDraw.RenderTargets.FirstOrDefault();
             if (firstTarget.Address != 0)
             {
@@ -8272,7 +8468,9 @@ public static partial class AgcExports
                 var sharedGlobalMemoryBuffers =
                     CreateTranslatedDrawGlobalBuffers(translatedDraw);
                 var sharedVertexBuffers =
-                    CreateGuestVertexBuffers(translatedDraw.VertexInputs);
+                    CreateGuestVertexBuffers(
+                        translatedDraw.VertexInputs,
+                        translatedDraw.VertexBufferBaseVertex);
                 TraceRectListVertices(translatedDraw, sharedVertexBuffers);
                 TraceGrassDrawVertices(translatedDraw, sharedTextures, sharedVertexBuffers);
                 TraceDrawCompact(
@@ -8329,7 +8527,9 @@ public static partial class AgcExports
                     var globalMemoryBuffers =
                         CreateTranslatedDrawGlobalBuffers(translatedDraw);
                     var vertexBuffers =
-                        CreateGuestVertexBuffers(translatedDraw.VertexInputs);
+                        CreateGuestVertexBuffers(
+                            translatedDraw.VertexInputs,
+                            translatedDraw.VertexBufferBaseVertex);
                     var renderState = translatedDraw.RenderState;
                     if (translatedDepthTarget.ReadOnly && renderState.Depth.WriteEnable)
                     {
@@ -8501,8 +8701,18 @@ public static partial class AgcExports
                 SelectExportUserDataRegister(state.ShRegisters),
                 out var exportState,
                 out error,
-                userDataScalarRegisterBase: NggUserDataScalarRegisterBase) ||
-            !Gen5ShaderScalarEvaluator.TryEvaluate(
+                userDataScalarRegisterBase: NggUserDataScalarRegisterBase))
+        {
+            return false;
+        }
+
+        // Embedded fetch prologs add their own base to gl_VertexID.  Keep the
+        // host draw offset at zero in that case; otherwise Vulkan applies the
+        // same first-vertex adjustment a second time.
+        var baseVertex = GetBaseVertex(state, exportState);
+        var vertexBufferBaseVertex = GetVertexBufferBaseVertex(exportState);
+        var recordBaseVertex = GetVertexRecordBaseVertex(state, exportState);
+        if (!Gen5ShaderScalarEvaluator.TryEvaluate(
                 ctx,
                 exportState,
                 out var exportEvaluation,
@@ -8513,6 +8723,7 @@ public static partial class AgcExports
                     state,
                     vertexCount,
                     indexed,
+                    recordBaseVertex,
                     out var depthVertexRecords)
                         ? depthVertexRecords
                         : null))
@@ -8661,7 +8872,8 @@ public static partial class AgcExports
             AttributeCount: 0,
             vertexCount,
             state.InstanceCount,
-            GetBaseVertex(state),
+            baseVertex,
+            vertexBufferBaseVertex,
             indexed ? CreateGuestIndexBuffer(ctx, state, vertexCount) : null,
             textures,
             exportEvaluation.GlobalMemoryBindings,
@@ -8716,6 +8928,13 @@ public static partial class AgcExports
             return false;
         }
 
+        // Embedded fetch prologs add their own base to gl_VertexID.  Keep the
+        // host draw offset at zero in that case; otherwise Vulkan applies the
+        // same first-vertex adjustment a second time.
+        var baseVertex = GetBaseVertex(state, exportState);
+        var vertexBufferBaseVertex = GetVertexBufferBaseVertex(exportState);
+        var recordBaseVertex = GetVertexRecordBaseVertex(state, exportState);
+
         if (!Gen5ShaderScalarEvaluator.TryEvaluate(
                 ctx,
                 exportState,
@@ -8727,6 +8946,7 @@ public static partial class AgcExports
                     state,
                     vertexCount,
                     indexed,
+                    recordBaseVertex,
                     out var vertexRecords)
                         ? vertexRecords
                         : null))
@@ -9173,7 +9393,8 @@ public static partial class AgcExports
             GetInterpolatedAttributeCount(pixelState),
             vertexCount,
             state.InstanceCount,
-            GetBaseVertex(state),
+            baseVertex,
+            vertexBufferBaseVertex,
             indexed ? CreateGuestIndexBuffer(ctx, state, vertexCount) : null,
             textures,
             globalMemoryBindings,
@@ -9535,6 +9756,193 @@ public static partial class AgcExports
     }
 
     /// <summary>
+    /// GFX10 CMASK fast clear: CB_COLORn_INFO.FAST_CLEAR (bit 12) set on
+    /// one or more targets. The CB clears via CMASK before the draw writes;
+    /// mark targets for clear-on-first-use. Unlike DCC, the draw content
+    /// IS written (not dropped). Dead Cells uses DbRenderControl CLEARON
+    /// instead (bit0), not this mechanism.
+    /// </summary>
+    private static bool IsCmaskFastClearDraw(
+        IReadOnlyDictionary<uint, uint> registers,
+        IReadOnlyList<RenderTargetDescriptor> renderTargets)
+    {
+        foreach (var rt in renderTargets)
+        {
+            var stride = rt.Slot * CbColorRegisterStride;
+            if (registers.TryGetValue(CbColor0Info + stride, out var info) &&
+                (info & CbColorInfoFastClearEnableMask) != 0)
+            {
+                return true;
+            }
+        }
+
+        return false;
+    }
+
+    /// <summary>
+    /// Registers the CMASK metadata mapping for each colour buffer.
+    /// Does NOT mark as cleared — clearing only happens on actual clear
+    /// events (DMA fill, compute write, EFC draw).
+    /// </summary>
+    private static void TrackCmaskAddresses(
+        IReadOnlyDictionary<uint, uint> registers,
+        IReadOnlyList<RenderTargetDescriptor> renderTargets)
+    {
+        foreach (var rt in renderTargets)
+        {
+            var stride = rt.Slot * CbColorRegisterStride;
+
+            // CMASK metadata address (legacy GCN path).
+            var cmaskRegAddr = CbColor0Cmask + stride;
+            registers.TryGetValue(cmaskRegAddr, out var cmaskLow);
+            var cmaskExtAddr = CbColor0CmaskBaseExt + rt.Slot;
+            registers.TryGetValue(cmaskExtAddr, out var cmaskExt);
+            var cmaskAddress = ((ulong)(cmaskExt & 0xFFu) << 40) |
+                               ((ulong)(cmaskLow & 0x1FFFFFFFu) << 8);
+
+            // DCC metadata address (GFX10+ primary path).
+            var dccRegAddr = CbColor0DccBase + stride;
+            registers.TryGetValue(dccRegAddr, out var dccLow);
+            var dccExtAddr = CbColor0DccBaseExt + rt.Slot;
+            registers.TryGetValue(dccExtAddr, out var dccExt);
+            var dccAddress = ((ulong)(dccExt & 0xFFu) << 40) |
+                             ((ulong)(dccLow & 0x1FFFFFFFu) << 8);
+
+            // Prefer CMASK if present; fall back to DCC.
+            var metaAddress = cmaskAddress != 0 ? cmaskAddress : dccAddress;
+
+            var cw0Addr = CbColor0ClearWord0 + stride;
+            var cw1Addr = CbColor0ClearWord1 + stride;
+            registers.TryGetValue(cw0Addr, out var cw0);
+            registers.TryGetValue(cw1Addr, out var cw1);
+
+            lock (_metaSurfaceGate)
+            {
+                _metaSurfaces[rt.Address] = new MetaSurfaceInfo(
+                    metaAddress, cw0, cw1,
+                    // Re-registration runs on every draw; keep the cleared state
+                    // so a mark-clear event survives until the pass consumes it.
+                    // If the metadata binding changed, the old state refers to
+                    // the old metadata and must be reset.
+                    IsCleared: _metaSurfaces.TryGetValue(rt.Address, out var prev) &&
+                               prev.IsCleared &&
+                               prev.CmaskAddress == metaAddress);
+                if (metaAddress != 0)
+                {
+                    _cmaskToColorBuffer[metaAddress] = rt.Address;
+                }
+            }
+        }
+    }
+
+    /// <summary>
+    /// Checks if a write targets a registered CMASK address. If so,
+    /// marks the owning colour buffer's metadata as "all clear".
+    /// </summary>
+    private static void CheckCmaskWrite(
+        ulong writeAddress,
+        SubmittedGpuState? gpuState)
+    {
+        if (writeAddress == 0)
+        {
+            return;
+        }
+
+        lock (_metaSurfaceGate)
+        {
+            // Exact match: write directly to a registered CMASK address.
+            if (_cmaskToColorBuffer.TryGetValue(writeAddress, out var cbAddr))
+            {
+                if (_metaSurfaces.TryGetValue(cbAddr, out var meta))
+                {
+                    _metaSurfaces[cbAddr] = meta with { IsCleared = true };
+                }
+
+                return;
+            }
+
+            // CMASK surfaces are small (typically ≤ 4 KiB).  Check the ±1024
+            // window around each registered address to catch partial writes.
+            foreach (var (cmaskAddr, colorBufAddr) in _cmaskToColorBuffer)
+            {
+                if (writeAddress >= cmaskAddr && writeAddress < cmaskAddr + 1024)
+                {
+                    if (_metaSurfaces.TryGetValue(colorBufAddr, out var meta))
+                    {
+                        _metaSurfaces[colorBufAddr] = meta with { IsCleared = true };
+                    }
+
+                    return;
+                }
+            }
+        }
+    }
+
+    /// <summary>
+    /// Returns true if the colour buffer at <paramref name="colorBufferAddress"/>
+    /// has pending CMASK "all clear" metadata — i.e. the surface was fast-cleared
+    /// but not yet rendered into.
+    /// </summary>
+    internal static bool IsMetaClearedForSurface(ulong colorBufferAddress)
+    {
+        lock (_metaSurfaceGate)
+        {
+            return _metaSurfaces.TryGetValue(colorBufferAddress, out var meta) &&
+                   meta.IsCleared;
+        }
+    }
+
+    /// <summary>
+    /// Consumes the "all clear" state for the given surface, marking it dirty.
+    /// Called after the first render pass uses LoadOp.Clear.
+    /// </summary>
+    internal static void ConsumeMetaClear(ulong colorBufferAddress)
+    {
+        lock (_metaSurfaceGate)
+        {
+            if (_metaSurfaces.TryGetValue(colorBufferAddress, out var meta))
+            {
+                _metaSurfaces[colorBufferAddress] = meta with { IsCleared = false };
+            }
+        }
+    }
+
+    /// <summary>
+    /// Returns the CB clear word values for the given colour buffer.
+    /// </summary>
+    internal static (uint Cw0, uint Cw1) GetMetaClearValue(ulong colorBufferAddress)
+    {
+        lock (_metaSurfaceGate)
+        {
+            if (_metaSurfaces.TryGetValue(colorBufferAddress, out var meta))
+            {
+                return (meta.ClearWord0, meta.ClearWord1);
+            }
+        }
+
+        return (0, 0);
+    }
+
+    /// <summary>
+    /// Marks all registered surfaces as "all clear".  Called at guest flip
+    /// (frame boundary).  Real hardware applies a fast clear / load-clear to
+    /// its per-frame surfaces every frame; the emulator restores that
+    /// per-frame clear here, per surface, at flip time.  This is the
+    /// per-surface successor of the removed flip-arm heuristic (which reset
+    /// only the first multi-attachment group).
+    /// </summary>
+    internal static void MarkAllSurfacesCleared()
+    {
+        lock (_metaSurfaceGate)
+        {
+            foreach (var (addr, meta) in _metaSurfaces)
+            {
+                _metaSurfaces[addr] = meta with { IsCleared = true };
+            }
+        }
+    }
+
+    /// <summary>
     /// True when the draw's float32x3 position stream spans the full clip
     /// rectangle, i.e. x and y both reach -1 and +1.
     /// </summary>
@@ -9603,14 +10011,64 @@ public static partial class AgcExports
         AgcIndexHelpers.Decode(state.IndexSize);
 
     /// <summary>
-    /// ResolveVertexOffset for the common UC path: GE_INDX_OFFSET is the
-    /// DrawIndexed vertexOffset / DrawAuto firstVertex. Embedded-fetch SGPR
-    /// fallback is not required when the game latches this register (GTA UI).
+    /// Resolve the Vulkan host vertex offset. GE_INDX_OFFSET is the
+    /// DrawIndexed vertexOffset / DrawAuto firstVertex when the translated
+    /// shader does not contain an embedded fetch prolog. Embedded prologs add
+    /// their user-SGPR offset to gl_VertexID themselves, so the host offset
+    /// must remain zero in that case.
     /// </summary>
-    private static int GetBaseVertex(SubmittedDcbState state) =>
-        state.UcRegisters.TryGetValue(GeIndxOffset, out var indexOffset)
-            ? unchecked((int)indexOffset)
-            : 0;
+    private static int GetBaseVertex(
+        SubmittedDcbState state,
+        Gen5ShaderState exportState)
+    {
+        if (Gen5ShaderTranslator.TryGetEmbeddedFetchVertexOffset(
+                exportState,
+                out _))
+        {
+            // The translated vertex shader already adds this value to
+            // gl_VertexID, so passing it through CmdDrawIndexed would double it.
+            return 0;
+        }
+
+        if (state.UcRegisters.TryGetValue(GeIndxOffset, out var indexOffset))
+        {
+            return unchecked((int)indexOffset);
+        }
+
+        return 0;
+    }
+
+    private static int GetVertexRecordBaseVertex(
+        SubmittedDcbState state,
+        Gen5ShaderState exportState)
+    {
+        if (Gen5ShaderTranslator.TryGetEmbeddedFetchVertexOffset(
+                exportState,
+                out var embeddedOffset))
+        {
+            return embeddedOffset;
+        }
+
+        if (state.UcRegisters.TryGetValue(GeIndxOffset, out var indexOffset))
+        {
+            return unchecked((int)indexOffset);
+        }
+
+        return 0;
+    }
+
+    /// <summary>
+    /// Resolve the record offset for host vertex attributes when the guest
+    /// shader applies its first-vertex value itself. The host draw stays at
+    /// vertex zero so gl_VertexID remains relative, while the buffer binding
+    /// starts at the guest record selected by the fetch prolog.
+    /// </summary>
+    private static int GetVertexBufferBaseVertex(Gen5ShaderState exportState) =>
+        Gen5ShaderTranslator.TryGetEmbeddedFetchVertexOffset(
+            exportState,
+            out var embeddedOffset)
+                ? embeddedOffset
+                : 0;
 
     private static GuestIndexBuffer? CreateGuestIndexBuffer(
         CpuContext ctx,
@@ -9667,9 +10125,10 @@ public static partial class AgcExports
         SubmittedDcbState state,
         uint drawCount,
         bool indexed,
+        int resolvedBaseVertex,
         out uint recordCount)
     {
-        var baseVertex = (uint)Math.Max(GetBaseVertex(state), 0);
+        var baseVertex = (uint)Math.Max(resolvedBaseVertex, 0);
         recordCount = Math.Max(
             baseVertex + drawCount,
             Math.Max(state.InstanceCount, 1u));
@@ -9946,7 +10405,7 @@ public static partial class AgcExports
     private static readonly HashSet<ulong> _sampledRenderTargets = new();
     private static readonly object _renderTargetProbeGate = new();
     private static long _renderTargetSampleTraceCount;
-    private static long _indirectDrawProbeCount;
+private static long _indirectDrawProbeCount;
     private static long _indirectDrawEmitCount;
     private static long _indirectDrawEmitRejectCount;
     private static long _indirectMultiProbeCount;
@@ -10915,8 +11374,10 @@ public static partial class AgcExports
     }
 
     private static IReadOnlyList<GuestVertexBuffer> CreateGuestVertexBuffers(
-        IReadOnlyList<Gen5VertexInputBinding> bindings)
+        IReadOnlyList<Gen5VertexInputBinding> bindings,
+        int baseVertex)
     {
+        var baseRecord = baseVertex > 0 ? checked((uint)baseVertex) : 0;
         var buffers = new GuestVertexBuffer[bindings.Count];
         for (var index = 0; index < bindings.Count; index++)
         {
@@ -10932,7 +11393,8 @@ public static partial class AgcExports
                 binding.Data,
                 binding.DataLength,
                 binding.DataPooled,
-                binding.PerInstance);
+                binding.PerInstance,
+                baseRecord);
         }
 
         return buffers;
@@ -12138,15 +12600,18 @@ public static partial class AgcExports
 
         if (dispatchEndX == 0 || dispatchEndY == 0 || dispatchEndZ == 0)
         {
-            // Indirect dispatches read their dimensions from a guest buffer a
-            // prior GPU dispatch fills. Zero here means that producer has not run
-            // yet — signal the caller to suspend on the dims buffer and retry,
-            // rather than dropping the work (which black-screens GPU-driven games
-            // like Astro Bot). Direct dispatches carry dims inline, so a zero is
-            // genuinely malformed and still rejected.
-            if (opcode == ItDispatchIndirect)
+            // For indirect dispatches (both absolute and base), zero dimensions are a valid outcome
+            // of GPU culling passes (0 workgroups). VulkanVideoPresenter handles groupCount = 0 as a clean no-op.
+            if (opcode == ItDispatchIndirect || dispatchSource is "absolute-indirect" or "base-indirect")
             {
-                indirectDimsRetryAddress = dimensionsAddress;
+                var waveCount = (initiator & (1u << 15)) != 0 ? 32u : 64u;
+                dispatch = new ComputeDispatch(
+                    0, 0, 0,
+                    0, 0, 0,
+                    waveCount,
+                    IsIndirect: true,
+                    0, 0, 0);
+                return true;
             }
 
             return RejectComputeDispatch(
@@ -12428,6 +12893,10 @@ public static partial class AgcExports
                     sequence,
                     shaderAddress,
                     binding.Opcode);
+
+                // Check if this compute shader writes to a CMASK address
+                // (shadPS4's IsComputeMetaClear logic)
+                CheckCmaskWrite(texture.Address, gpuState);
 
                 TraceAgcShader(
                     $"agc.compute_writer addr=0x{texture.Address:X16} " +
@@ -13024,11 +13493,14 @@ public static partial class AgcExports
                     return;
                 }
 
-                GuestImageWriteTracker.Track(
+GuestImageWriteTracker.Track(
                     destinationAddress,
                     (ulong)output.Length,
                     VulkanVideoPresenter.CurrentGuestWorkSequenceForDiagnostics,
                     "agc.constant-fill");
+
+                VulkanVideoPresenter.RequestGuestColorClear(destinationAddress);
+
             },
             $"constant_fill dst=0x{destinationAddress:X16} bytes={output.Length}");
         description =
@@ -14238,7 +14710,12 @@ public static partial class AgcExports
 
         if (shRegistersAddress == 0 || registerCount < 2)
         {
-            return false;
+            TraceCreateShader(
+                0,
+                headerAddress,
+                codeAddress,
+                $"skip-pgm-patch type={shaderType} shRegs=0x{shRegistersAddress:X16} regCount={registerCount}");
+            return true;
         }
 
         // Type bytes follow the Prospero half/fused enum used by fuse-shader
@@ -14267,9 +14744,10 @@ public static partial class AgcExports
             _ => 0u,
         };
 
-        // GTA V Enhanced hull shaders (type 5) put RSRC1/RSRC2 (0x10A/0x10B) at
-        // the front of the SH default table; PGM_LO/HI sit elsewhere (or are
-        // filled later via SetShRegisterDirect).
+        // Some shader headers (e.g. GTA V Enhanced hull shaders, GS front shaders,
+        // or UE4 mesh/task/vertex shaders where type=8 or user data registers are placed first)
+        // omit PGM_LO/HI from the default SH table. Still succeed: the code VA
+        // lives at ShaderCodeOffset and later binder paths republish it.
         if (!TryFindShaderProgramRegisterPair(
                 ctx,
                 shRegistersAddress,
@@ -14282,28 +14760,12 @@ public static partial class AgcExports
                 out var foundHi))
         {
             TryReadUInt32(ctx, shRegistersAddress, out var firstLo);
-            // GTA V Enhanced HS headers start at RSRC1/RSRC2 (0x10A/0x10B) and
-            // omit PGM_LO/HI from the default table. Still succeed: the code VA
-            // lives at ShaderCodeOffset and later binder paths republish it.
-            // GS front headers can likewise start at RSRC1_GS (0x8A) instead of
-            // PGM_LO_GS (0x88) - same deal, skip the patch here.
-            if ((shaderType == HsFrontShaderType && firstLo is SpiShaderPgmRsrc1Hs or SpiShaderPgmLoHs) ||
-                (shaderType == GsFrontShaderType && firstLo is SpiShaderPgmRsrc1Gs or SpiShaderPgmLoGs))
-            {
-                TraceCreateShader(
-                    0,
-                    headerAddress,
-                    codeAddress,
-                    $"skip-pgm-patch type={shaderType} first_lo=0x{firstLo:X8}");
-                return true;
-            }
-
             TraceCreateShader(
                 0,
                 headerAddress,
                 codeAddress,
-                $"unexpected-registers type={shaderType} expected_lo=0x{expectedLo:X8} first_lo=0x{firstLo:X8}");
-            return false;
+                $"skip-pgm-patch type={shaderType} expected_lo=0x{expectedLo:X8} first_lo=0x{firstLo:X8}");
+            return true;
         }
 
         var loValue = (uint)((codeAddress >> 8) & 0xFFFF_FFFFUL);
