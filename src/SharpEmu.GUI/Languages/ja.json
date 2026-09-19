@@ -1,9 +1,4 @@
 {
-  "Options.Env.BinkPlayback.Label": "Bink 動画再生",
-  "Options.Env.BinkPlayback.Desc": "Host は FFmpeg ブリッジ経由で Bink 動画を再生しますが、一部のゲームで問題が発生する場合があります。\nGuest はゲームエンジン独自のデコーダーを使用しますが、SharpEmu は現在これを部分的にしかサポートしていません。\nSkip は Bink 動画をスキップし、開発を容易にする場合があります。",
-  "Options.Env.BinkPlayback.Host": "Host (FFmpeg)",
-  "Options.Env.BinkPlayback.Guest": "Guest",
-  "Options.Env.BinkPlayback.Skip": "スキップ",
   "_languageName": "日本語",
 
   "Page.Library": "ライブラリ",
@@ -220,5 +215,10 @@
   "Options.VSync.Desc": "ティアリングのない表示のためFIFOプレゼンテーションを使用します。",
   "Options.Hdr.Label": "HDR出力",
   "Options.Hdr.Desc": "選択したディスプレイとグラフィックスバックエンドが対応している場合にHDRを使用します。自動ではSDRにフォールバックします。",
-  "Options.Hdr.Auto": "自動"
+  "Options.Hdr.Auto": "自動",
+  "Options.Env.BinkPlayback.Label": "Bink 動画再生",
+  "Options.Env.BinkPlayback.Desc": "Host は FFmpeg ブリッジ経由で Bink 動画を再生しますが、一部のゲームで問題が発生する場合があります。\nGuest はゲームエンジン独自のデコーダーを使用しますが、SharpEmu は現在これを部分的にしかサポートしていません。\nSkip は Bink 動画をスキップし、開発を容易にする場合があります。",
+  "Options.Env.BinkPlayback.Host": "Host (FFmpeg)",
+  "Options.Env.BinkPlayback.Guest": "Guest",
+  "Options.Env.BinkPlayback.Skip": "スキップ"
 }

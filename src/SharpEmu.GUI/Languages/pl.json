@@ -1,9 +1,4 @@
 {
-  "Options.Env.BinkPlayback.Label": "Odtwarzanie wideo Bink",
-  "Options.Env.BinkPlayback.Desc": "Host odtwarza filmy Bink przez most FFmpeg, ale w niektórych grach mogą wystąpić problemy.\nGuest używa dekodera silnika gry, który SharpEmu obecnie obsługuje tylko częściowo.\nSkip pomija filmy Bink, co może ułatwić rozwój.",
-  "Options.Env.BinkPlayback.Host": "Host (FFmpeg)",
-  "Options.Env.BinkPlayback.Guest": "Guest",
-  "Options.Env.BinkPlayback.Skip": "Pomiń",
   "_languageName": "Polski",
 
   "Page.Library": "Biblioteka",
@@ -89,6 +84,11 @@
   "Options.Hdr.Label": "Wyjście HDR",
   "Options.Hdr.Desc": "Używaj HDR, gdy wybrany wyświetlacz i backend graficzny to obsługują. Automatyczny przełącza na SDR.",
   "Options.Hdr.Auto": "Automatyczny",
+  "Options.Env.BinkPlayback.Label": "Odtwarzanie wideo Bink",
+  "Options.Env.BinkPlayback.Desc": "Host odtwarza filmy Bink przez most FFmpeg, ale w niektórych grach mogą wystąpić problemy.\nGuest używa dekodera silnika gry, który SharpEmu obecnie obsługuje tylko częściowo.\nSkip pomija filmy Bink, co może ułatwić rozwój.",
+  "Options.Env.BinkPlayback.Host": "Host (FFmpeg)",
+  "Options.Env.BinkPlayback.Guest": "Guest",
+  "Options.Env.BinkPlayback.Skip": "Pomiń",
 
   "Options.CpuEngine.Label": "Silnik CPU",
   "Options.CpuEngine.Desc": "Silnik wykonawczy używany do uruchamiania kodu gry.",

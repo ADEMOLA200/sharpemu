@@ -1,9 +1,4 @@
 {
-  "Options.Env.BinkPlayback.Label": "Bink video oynatma",
-  "Options.Env.BinkPlayback.Desc": "Host, Bink videolarını FFmpeg köprüsüyle oynatır ancak bazı oyunlarda sorunlarla karşılaşabilir.\nGuest, oyun motorunun kendi kod çözücüsünü kullanır ancak SharpEmu bunu şu anda yalnızca kısmen desteklemektedir.\nSkip, Bink videolarını atlar; bu, geliştirmeyi kolaylaştırabilir.",
-  "Options.Env.BinkPlayback.Host": "Host (FFmpeg)",
-  "Options.Env.BinkPlayback.Guest": "Guest",
-  "Options.Env.BinkPlayback.Skip": "Atla",
   "_languageName": "Türkçe",
 
   "Page.Library": "Kütüphane",
@@ -224,5 +219,10 @@
   "Options.Scaling.Cover": "Kapla",
   "Options.Scaling.Stretch": "Uzat",
   "Options.Scaling.Integer": "Tam sayı",
-  "Options.Hdr.Auto": "Otomatik"
+  "Options.Hdr.Auto": "Otomatik",
+  "Options.Env.BinkPlayback.Label": "Bink video oynatma",
+  "Options.Env.BinkPlayback.Desc": "Host, Bink videolarını FFmpeg köprüsüyle oynatır ancak bazı oyunlarda sorunlarla karşılaşabilir.\nGuest, oyun motorunun kendi kod çözücüsünü kullanır ancak SharpEmu bunu şu anda yalnızca kısmen desteklemektedir.\nSkip, Bink videolarını atlar; bu, geliştirmeyi kolaylaştırabilir.",
+  "Options.Env.BinkPlayback.Host": "Host (FFmpeg)",
+  "Options.Env.BinkPlayback.Guest": "Guest",
+  "Options.Env.BinkPlayback.Skip": "Atla"
 }
