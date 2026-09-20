@@ -55,13 +55,17 @@ Our goal is **not** to emulate PS4 games, as there is already an excellent emula
 
 ## Games Tested
 
-|               Demons Souls Remake                   |                     Dreaming Sarah                         |
+|               Demons Souls Remake                   |                     Tomb Raider V Remastered                        |
 | :-----------------------------------------------------------: | :--------------------------------------------------------------------------------------------: |
-| ![Bloodborne screenshot](./.github/images/demons-souls.jpg) | ![Dreaming Sarah](./.github/images/dreaming-sarah.jpg) |
+| ![DeS screenshot](./.github/images/demons-souls.jpg) | ![Tomb Raider V](./.github/images/tomb-raider-v-remastered.jpg) |
 
-|                  Void Terrarium                     |                 Dead Cells                    |
+|                  Hades                    |                 Dead Cells                    |
 | :------------------------------------------------------------------------: | :------------------------------------------------------------------: |
-| ![Void Terrarium](./.github/images/void-terrarium.jpg) | ![Dead Cells](./.github/images/dead-cells.jpg) |
+| ![Hades](./.github/images/hades.jpg) | ![Dead Cells](./.github/images/dead-cells.jpg) |
+
+|                  PAC-MAN World Re-PAC                    |                 Cult of the Lamb                    |
+| :------------------------------------------------------------------------: | :------------------------------------------------------------------: |
+| ![Pac-Man](./.github/images/pac-man-world-re-pac.jpg) | ![Cult of the Lamb](./.github/images/cult-of-the-lamb.jpg) |
 
 ## Status
 
