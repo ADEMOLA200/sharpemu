@@ -16,11 +16,6 @@ public sealed class Gen5ShaderAtomicDecodeTests
     private const ulong ShaderAddress = 0x1_0000_0000;
     private const uint EndPgm = 0xBF810000;
 
-    // Compute-stage register block: COMPUTE_USER_DATA_0 and COMPUTE_PGM_RSRC2,
-    // required since TryCreateState validates the USER_SGPR count.
-    internal const uint ComputeUserDataRegister = 0x240;
-    internal const uint ComputePgmRsrc2Register = 0x213;
-
     [Fact]
     public void BufferAtomicUmax_DecodesControlAndDestination()
     {
@@ -103,22 +98,49 @@ public sealed class Gen5ShaderAtomicDecodeTests
         Assert.Equal(new[] { Gen5Operand.Vector(3) }, instruction.Destinations);
     }
 
+    [Fact]
+    public void DsWriteB32_CombinesBothOffsetBytes()
+    {
+        // DS_WRITE_B32 v0, v1 offset:0x0808.
+        var instruction = DecodeSingle(0xD8340808, 0x00000100);
+
+        Assert.Equal("DsWriteB32", instruction.Opcode);
+        var control = Assert.IsType<Gen5DataShareControl>(instruction.Control);
+        Assert.Equal(0x08u, control.Offset0);
+        Assert.Equal(0x08u, control.Offset1);
+        Assert.Equal(0x0808u, control.SingleOffsetBytes);
+    }
+
+    [Theory]
+    [InlineData(0xD8FA3412u, "DsAppend")]
+    [InlineData(0xD8F63412u, "DsConsume")]
+    public void DsWaveCounter_UsesM0AndReturnsOldValue(uint word, string opcode)
+    {
+        var instruction = DecodeSingle(word, 0x07000000);
+
+        Assert.Equal(opcode, instruction.Opcode);
+        Assert.Equal(new[] { Gen5Operand.Scalar(124) }, instruction.Sources);
+        Assert.Equal(new[] { Gen5Operand.Vector(7) }, instruction.Destinations);
+        var control = Assert.IsType<Gen5DataShareControl>(instruction.Control);
+        Assert.Equal(0x12u, control.Offset0);
+        Assert.Equal(0x34u, control.Offset1);
+        Assert.Equal(0x3412u, control.SingleOffsetBytes);
+        Assert.False(control.Gds);
+    }
+
     private static Gen5ShaderInstruction DecodeSingle(params uint[] words)
     {
         var memory = new FakeCpuMemory(ShaderAddress, 0x1000);
         var ctx = new CpuContext(memory, Generation.Gen5);
         WriteProgram(memory, ShaderAddress, words);
         Assert.True(
-            Gen5ShaderTranslator.TryCreateState(
+            Gen5ShaderTranslator.TryDecodeProgram(
                 ctx,
                 ShaderAddress,
-                0,
-                new Dictionary<uint, uint> { [ComputePgmRsrc2Register] = 0 },
-                ComputeUserDataRegister,
-                out var state,
+                out var program,
                 out var error),
             error);
-        return state.Program.Instructions[0];
+        return program.Instructions[0];
     }
 
     internal static void WriteProgram(FakeCpuMemory memory, ulong address, uint[] words)

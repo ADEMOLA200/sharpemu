@@ -10,6 +10,7 @@ using System.Runtime.InteropServices;
 using System.Threading;
 using SharpEmu.Core.Cpu.Disasm;
 using SharpEmu.HLE;
+using SharpEmu.HLE.GpuMemory;
 
 namespace SharpEmu.Core.Cpu.Native;
 
@@ -40,15 +41,6 @@ public sealed partial class DirectExecutionBackend
 			}
 			_rawExceptionHandler = (nint)AddVectoredExceptionHandler(1u, _rawExceptionHandlerStub);
 			Console.Error.WriteLine($"[LOADER][INFO] Raw exception handler installed: 0x{_rawExceptionHandler:X16}");
-
-			// The raw handler carries the guest-image write-fault bridge, so the
-			// path must be compiled before the first protected-page store can
-			// reach it. Guest code has not started yet, so warming here cannot
-			// race a real fault.
-			SharpEmu.HLE.GuestImageWriteTracker.WarmUp();
-			Console.Error.WriteLine(
-				"[LOADER][INFO] Guest image CPU write tracking: " +
-				$"{(SharpEmu.HLE.GuestImageWriteTracker.Enabled ? "enabled" : "disabled")}");
 		}
 		else
 		{
@@ -64,7 +56,6 @@ public sealed partial class DirectExecutionBackend
 		}
 		_exceptionHandler = (nint)AddVectoredExceptionHandler(1u, _exceptionHandlerStub);
 		Console.Error.WriteLine($"[LOADER][INFO] Exception handler installed: 0x{_exceptionHandler:X16}");
-		SharpEmu.HLE.GuestImageWriteTracker.WarmUp();
 
 		_unhandledFilterDelegate = UnhandledExceptionFilter;
 		_unhandledFilterHandle = GCHandle.Alloc(_unhandledFilterDelegate);
@@ -127,8 +118,10 @@ public sealed partial class DirectExecutionBackend
 			{
 				return -1;
 			}
-			if (exceptionCode == 3221225477u &&
+			if (!OperatingSystem.IsWindows() &&
+				exceptionCode == 3221225477u &&
 				exceptionRecord->NumberParameters >= 2 &&
+				exceptionRecord->ExceptionInformation[0] == 1uL &&
 				SharpEmu.HLE.GuestImageWriteTracker.TryHandleWriteFault(
 					exceptionRecord->ExceptionInformation[1]))
 			{
@@ -145,6 +138,10 @@ public sealed partial class DirectExecutionBackend
 			}
 			if (exceptionCode == 3221225477u &&
 				TryRecoverGuestAllocatorHole(exceptionRecord, contextRecord, rip))
+			{
+				return -1;
+			}
+			if (exceptionCode == 3221225477u && TryResolveGpuFault(exceptionRecord))
 			{
 				return -1;
 			}
@@ -280,7 +277,7 @@ public sealed partial class DirectExecutionBackend
 			for (int i = 0; i < 16; i++)
 			{
 				ulong stackAddr = rsp + (ulong)(i * 8);
-				if (!TryReadHostQword(stackAddr, out ulong value))
+				if (!TryReadDiagnosticHostQword(stackAddr, out ulong value))
 				{
 					Console.Error.WriteLine("[LOADER][WARNING]   Could not read stack qwords.");
 					break;
@@ -297,7 +294,7 @@ public sealed partial class DirectExecutionBackend
 				var windowStart = rsp >= 0x300 ? rsp - 0x300 : 0;
 				for (var stackAddr = windowStart; stackAddr < rsp + 0x100; stackAddr += 8)
 				{
-					if (!TryReadHostQword(stackAddr, out var value))
+					if (!TryReadDiagnosticHostQword(stackAddr, out var value))
 					{
 						continue;
 					}
@@ -322,18 +319,18 @@ public sealed partial class DirectExecutionBackend
 			DumpPointerWindow("fault-register-r13", r13, 0x60);
 			DumpPointerWindow("fault-register-r14", r14, 0x60);
 
-
 			try
 			{
 				Console.Error.WriteLine("[LOADER][INFO]   Frame chain (RBP walk):");
 				ulong frame = rbp;
 				for (int i = 0; i < 12; i++)
 				{
-					if (frame < 0x10000)
+					if (!IsCanonicalUserAddress(frame) || (frame & 7) != 0)
 					{
 						break;
 					}
-					if (!TryReadHostQword(frame, out ulong next) || !TryReadHostQword(frame + 8, out ulong ret))
+					if (!TryReadDiagnosticHostQword(frame, out ulong next) ||
+						!TryReadDiagnosticHostQword(frame + 8, out ulong ret))
 					{
 						Console.Error.WriteLine("[LOADER][WARNING]   Could not walk RBP frame chain.");
 						break;
@@ -612,7 +609,7 @@ public sealed partial class DirectExecutionBackend
 		}
 
 		byte[] opcode = new byte[2];
-		if (!TryReadHostBytes(rip, opcode) || opcode[0] != 0xCD || opcode[1] != 0x41)
+		if (!TryReadExecutableBytes(rip, opcode) || opcode[0] != 0xCD || opcode[1] != 0x41)
 		{
 			return false;
 		}
@@ -626,6 +623,25 @@ public sealed partial class DirectExecutionBackend
 			Console.Error.Flush();
 		}
 		return true;
+	}
+
+	// Runs after the lazy-commit branch. That branch commits the page first.
+	private unsafe static bool TryResolveGpuFault(EXCEPTION_RECORD* exceptionRecord)
+	{
+		if (exceptionRecord->NumberParameters < 2)
+		{
+			return false;
+		}
+
+		var kind = exceptionRecord->ExceptionInformation[0] switch
+		{
+			0 => FaultKind.Read,
+			1 => FaultKind.Write,
+			8 => FaultKind.Execute,
+			_ => FaultKind.Unknown,
+		};
+		return kind != FaultKind.Unknown
+			&& GuestGpuMemoryHook.TryResolveFault(kind, exceptionRecord->ExceptionInformation[1]);
 	}
 
 	private unsafe static bool TryRecoverGuestAllocatorHole(
@@ -765,7 +781,7 @@ public sealed partial class DirectExecutionBackend
 		// Optimized guest code frequently omits frame pointers. The return
 		// address at RSP is then more useful than an RBP walk and identifies the
 		// exact call site that supplied the faulting arguments.
-		if (TryReadHostQword(rsp, out var stackReturn) && stackReturn >= 0x60)
+		if (TryReadDiagnosticHostQword(rsp, out var stackReturn) && stackReturn >= 0x60)
 		{
 			DumpGuestInstructionStream("stack-return-prelude", stackReturn - 0x60, 40);
 		}
@@ -1194,7 +1210,7 @@ public sealed partial class DirectExecutionBackend
 		for (int offset = 0; offset < size; offset += 8)
 		{
 			ulong slotAddress = baseAddress + (ulong)offset;
-			if (!TryReadQword(slotAddress, out var value))
+			if (slotAddress < baseAddress || !TryReadDiagnosticHostQword(slotAddress, out var value))
 			{
 				Console.Error.WriteLine($"[LOADER][INFO]     +0x{offset:X2}: <unreadable>");
 				break;
@@ -1235,12 +1251,18 @@ public sealed partial class DirectExecutionBackend
 		}
 	}
 
-	private unsafe static bool TryReadHostQword(ulong address, out ulong value)
+	private static bool TryReadHostQword(ulong address, out ulong value)
 	{
 		value = 0;
-		if (address < 65536) return false;
+		if (address < 0x10000)
+		{
+			return false;
+		}
 		if (!OperatingSystem.IsWindows())
 		{
+			// A stray read inside the signal handler would raise a nested
+			// SIGSEGV and kill the process before diagnostics finish, so
+			// probe the region table instead of relying on try/catch.
 			return TryReadStackU64(address, out value);
 		}
 
@@ -1255,24 +1277,90 @@ public sealed partial class DirectExecutionBackend
 		}
 	}
 
-	private unsafe static bool TryReadHostBytes(ulong address, byte[] buffer)
+	private unsafe static bool TryReadDiagnosticHostQword(ulong address, out ulong value)
 	{
-		if (address < 65536)
+		if (OperatingSystem.IsLinux())
+		{
+			ulong result = 0;
+			bool success = TryReadLinuxMemory(address, (byte*)&result, sizeof(ulong));
+			value = success ? result : 0;
+			return success;
+		}
+
+		if (OperatingSystem.IsMacOS())
+		{
+			ulong result = 0;
+			bool success = TryReadMacOsMemory(address, (byte*)&result, sizeof(ulong));
+			value = success ? result : 0;
+			return success;
+		}
+
+		if (!OperatingSystem.IsWindows())
+		{
+			return TryReadStackU64(address, out value);
+		}
+
+		value = 0;
+		if (!IsReadableHostRange(address, sizeof(ulong)))
 		{
 			return false;
 		}
 
+		ulong readValue = 0;
+		if (ReadProcessMemory(
+				(nint)(-1),
+				(nint)address,
+				&readValue,
+				sizeof(ulong),
+				out var bytesRead) == 0 ||
+			bytesRead != sizeof(ulong))
+		{
+			return false;
+		}
+
+		value = readValue;
+		return true;
+	}
+
+	private unsafe static bool TryReadHostBytes(ulong address, byte[] buffer)
+	{
+		if (OperatingSystem.IsLinux())
+		{
+			fixed (byte* destination = buffer)
+			{
+				return TryReadLinuxMemory(address, destination, buffer.Length);
+			}
+		}
+
+		if (OperatingSystem.IsMacOS())
+		{
+			fixed (byte* destination = buffer)
+			{
+				return TryReadMacOsMemory(address, destination, buffer.Length);
+			}
+		}
+
+		if (!IsReadableHostRange(address, buffer.Length))
+		{
+			return false;
+		}
+
+		if (buffer.Length == 0)
+		{
+			return true;
+		}
+
 		if (OperatingSystem.IsWindows())
 		{
-			ulong end = address + (ulong)buffer.Length;
-			for (ulong page = address & 0xFFFFFFFFFFFFF000uL; page < end; page += 4096)
+			fixed (byte* destination = buffer)
 			{
-				if (VirtualQuery((void*)page, out var mbi, (nuint)sizeof(MEMORY_BASIC_INFORMATION64)) == 0 ||
-					mbi.State != MEM_COMMIT ||
-					!IsReadableProtection(mbi.Protect))
-				{
-					return false;
-				}
+				return ReadProcessMemory(
+					(nint)(-1),
+					(nint)address,
+					destination,
+					(nuint)buffer.Length,
+					out var bytesRead) != 0 &&
+					bytesRead == (nuint)buffer.Length;
 			}
 		}
 
@@ -1287,6 +1375,138 @@ public sealed partial class DirectExecutionBackend
 		}
 	}
 
+	private unsafe static bool TryReadLinuxMemory(ulong address, byte* destination, int byteCount)
+	{
+		if (byteCount < 0 || !IsCanonicalUserAddress(address) ||
+			address > 0x0000_8000_0000_0000UL - (ulong)byteCount)
+		{
+			return false;
+		}
+
+		if (byteCount == 0) return true;
+
+		// Read through the kernel so untracked or inaccessible pages cannot fault the reader.
+		var local = new DiagnosticMemoryVector { Address = (nint)destination, Length = (nuint)byteCount };
+		var remote = new DiagnosticMemoryVector { Address = (nint)address, Length = (nuint)byteCount };
+		return ReadLinuxProcessMemory(Environment.ProcessId, &local, 1, &remote, 1, 0) == byteCount;
+	}
+
+	[StructLayout(LayoutKind.Sequential)]
+	private struct DiagnosticMemoryVector
+	{
+		public nint Address;
+		public nuint Length;
+	}
+
+	[DllImport("libc", EntryPoint = "process_vm_readv")]
+	private unsafe static extern nint ReadLinuxProcessMemory(
+		int processId, DiagnosticMemoryVector* local, nuint localCount,
+		DiagnosticMemoryVector* remote, nuint remoteCount, nuint flags);
+
+	private unsafe static bool TryReadMacOsMemory(ulong address, byte* destination, int byteCount)
+	{
+		if (byteCount < 0 || !IsCanonicalUserAddress(address) ||
+			address > 0x0000_8000_0000_0000UL - (ulong)byteCount)
+		{
+			return false;
+		}
+
+		if (byteCount == 0)
+		{
+			return true;
+		}
+
+		// The host memory table does not contain all guest code mappings.
+		// Use Mach to read the memory and report access errors without another fault.
+		return ReadMachVirtualMemory(GetCurrentMachTask(), address, (ulong)byteCount,
+			(ulong)destination, out var bytesRead) == 0 && bytesRead == (ulong)byteCount;
+	}
+
+	[DllImport("libSystem.B.dylib", EntryPoint = "mach_task_self")]
+	private static extern uint GetCurrentMachTask();
+
+	[DllImport("libSystem.B.dylib", EntryPoint = "mach_vm_read_overwrite")]
+	private static extern int ReadMachVirtualMemory(
+		uint taskHandle, ulong sourceAddress, ulong byteCount, ulong destinationAddress, out ulong bytesRead);
+
+	private unsafe static bool TryReadExecutableBytes(ulong address, byte[] buffer)
+	{
+		if (!OperatingSystem.IsWindows())
+		{
+			return TryReadHostBytes(address, buffer);
+		}
+
+		// Faulting x64 code can have execute-only protection. Data probes still require read access.
+		if (!IsReadableHostRange(address, buffer.Length, allowExecuteOnly: true))
+		{
+			return false;
+		}
+
+		if (buffer.Length == 0)
+		{
+			return true;
+		}
+
+		// RIP identifies code that Windows was already executing when the
+		// exception occurred. These mappings are stable for the duration of
+		// dispatch, so read them directly. Arbitrary diagnostic and operand
+		// addresses continue to use ReadProcessMemory above because they can
+		// become invalid while an exception is being reported.
+		new ReadOnlySpan<byte>((void*)address, buffer.Length).CopyTo(buffer);
+		return true;
+	}
+
+	private unsafe static bool IsReadableHostRange(ulong address, int byteCount, bool allowExecuteOnly = false)
+	{
+		if (byteCount < 0 || !IsCanonicalUserAddress(address))
+		{
+			return false;
+		}
+
+		var length = (ulong)byteCount;
+		if (address > 0x0000_8000_0000_0000UL - length)
+		{
+			return false;
+		}
+
+		var end = address + length;
+		var cursor = address;
+		while (cursor < end)
+		{
+			if (VirtualQuery(
+					(void*)cursor,
+					out var mbi,
+					(nuint)sizeof(MEMORY_BASIC_INFORMATION64)) == 0 ||
+				mbi.State != MEM_COMMIT ||
+				(!IsReadableProtection(mbi.Protect) &&
+				 !(allowExecuteOnly && mbi.Protect == 0x10)))
+			{
+				return false;
+			}
+
+			var regionEnd = mbi.BaseAddress + mbi.RegionSize;
+			if (regionEnd < mbi.BaseAddress || regionEnd <= cursor)
+			{
+				return false;
+			}
+
+			cursor = Math.Min(regionEnd, end);
+		}
+
+		return true;
+	}
+
+	private static bool IsCanonicalUserAddress(ulong address) =>
+		address >= 0x10000 && address < 0x0000_8000_0000_0000UL;
+
+	[DllImport("kernel32.dll", SetLastError = false)]
+	private unsafe static extern int ReadProcessMemory(
+		nint process,
+		nint baseAddress,
+		void* buffer,
+		nuint byteCount,
+		out nuint bytesRead);
+
 	private string FormatPointerWithNearestSymbol(ulong value)
 	{
 		string text = $"0x{value:X16}";
@@ -1300,9 +1520,10 @@ public sealed partial class DirectExecutionBackend
 
 	private void InitializeRuntimeSymbolIndex(IReadOnlyDictionary<string, ulong> runtimeSymbols)
 	{
-		_runtimeSymbolsByName.Clear();
+		var symbolsByName = new Dictionary<string, ulong>(StringComparer.Ordinal);
 		if (runtimeSymbols.Count == 0)
 		{
+			Volatile.Write(ref _runtimeSymbolsByName, symbolsByName);
 			_runtimeSymbolsByAddress = Array.Empty<KeyValuePair<string, ulong>>();
 			return;
 		}
@@ -1313,11 +1534,12 @@ public sealed partial class DirectExecutionBackend
 			if (runtimeSymbol.Value != 0L && !string.IsNullOrWhiteSpace(runtimeSymbol.Key))
 			{
 				list.Add(runtimeSymbol);
-				_runtimeSymbolsByName[runtimeSymbol.Key] = runtimeSymbol.Value;
+				symbolsByName[runtimeSymbol.Key] = runtimeSymbol.Value;
 			}
 		}
 
 		list.Sort((a, b) => a.Value.CompareTo(b.Value));
+		Volatile.Write(ref _runtimeSymbolsByName, symbolsByName);
 		_runtimeSymbolsByAddress = list.ToArray();
 	}
 
@@ -1623,7 +1845,14 @@ public sealed partial class DirectExecutionBackend
 			return;
 		}
 
-		PatchTlsPatternsInRange(committedBase, committedBase + committedSize, announce: false);
+		var counts = PatchTlsPatternsInRange(committedBase, committedBase + committedSize);
+		if (counts.Total != 0)
+		{
+			Console.Error.WriteLine(
+				$"[LOADER][INFO] Patched {counts.Loads} TLS loads, {counts.Stores} TLS stores, " +
+				$"{counts.StackCanaries} stack-canary accesses " +
+				$"(lazy-commit rescan 0x{committedBase:X16}-0x{committedBase + committedSize:X16})");
+		}
 	}
 
 	private static bool ShouldTraceLazyCommit(int traceIndex)

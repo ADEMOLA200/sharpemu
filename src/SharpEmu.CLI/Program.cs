@@ -32,7 +32,6 @@ internal static partial class Program
     private const ulong PROCESS_CREATION_MITIGATION_POLICY_CONTROL_FLOW_GUARD_ALWAYS_OFF = 0x00000002UL << 40;
     private const ulong PROCESS_CREATION_MITIGATION_POLICY2_CET_USER_SHADOW_STACKS_ALWAYS_OFF = 0x00000002UL << 28;
     private const ulong PROCESS_CREATION_MITIGATION_POLICY2_USER_CET_SET_CONTEXT_IP_VALIDATION_ALWAYS_OFF = 0x00000002UL << 32;
-    private const ulong PROCESS_CREATION_MITIGATION_POLICY2_XTENDED_CONTROL_FLOW_GUARD_ALWAYS_OFF = 0x00000002UL << 40;
     private const int ATTACH_PARENT_PROCESS = -1;
     private const int STD_INPUT_HANDLE = -10;
     private const int STD_OUTPUT_HANDLE = -11;
@@ -47,6 +46,9 @@ internal static partial class Program
     private static int Main(string[] args)
     {
         ConfigureManagedPluginResolution();
+
+        if (args.Length > 0 && args[0] == SharpEmu.Core.Diagnostics.WindowsCrashCapture.HelperArgument)
+            return SharpEmu.Core.Diagnostics.WindowsCrashCapture.RunHelper(args);
 
         SharpEmu.Libs.VideoOut.RenderDocCapture.Initialize();
 
@@ -304,6 +306,8 @@ internal static partial class Program
 
         Console.Error.WriteLine("[DEBUG] Creating runtime...");
 
+        SharpEmu.Core.Diagnostics.WindowsCrashCapture.StartIfEnabled(logFilePath);
+
         try
         {
             using var runtime = SharpEmuRuntime.CreateDefault(runtimeOptions);
@@ -520,20 +524,15 @@ internal static partial class Program
             return false;
         }
 
-        string[] childArgs;
-        var commandLineArgs = Environment.GetCommandLineArgs();
-        var entryAssembly = commandLineArgs.Length != 0 ? commandLineArgs[0] : null;
-        if (Path.GetFileNameWithoutExtension(processPath).Equals("dotnet", StringComparison.OrdinalIgnoreCase) &&
-            !string.IsNullOrWhiteSpace(entryAssembly))
-        {
-            childArgs = [entryAssembly, MitigatedChildFlag, .. args];
-        }
-        else
-        {
-            childArgs = [MitigatedChildFlag, .. args];
-        }
+        var commandLineArguments = Environment.GetCommandLineArgs();
+        var entryAssemblyPath = commandLineArguments.Length > 0 ? commandLineArguments[0] : null;
+        string[] childArguments =
+            Path.GetFileNameWithoutExtension(processPath).Equals("dotnet", StringComparison.OrdinalIgnoreCase) &&
+            !string.IsNullOrWhiteSpace(entryAssemblyPath)
+                ? [entryAssemblyPath, MitigatedChildFlag, .. args]
+                : [MitigatedChildFlag, .. args];
 
-        var commandLine = BuildCommandLine(processPath, childArgs);
+        var commandLine = BuildCommandLine(processPath, childArguments);
         var startupInfoEx = new STARTUPINFOEX();
         startupInfoEx.StartupInfo.cb = Marshal.SizeOf<STARTUPINFOEX>();
         ConfigureInheritedStdHandles(ref startupInfoEx.StartupInfo);
@@ -1000,7 +999,7 @@ internal static partial class Program
 
     private static void PrintUsage()
     {
-        Log.Info("Usage: SharpEmu.CLI [--strict] [--trace-imports[=N]] [--cpu-engine=<native>] [--log-level=<level>] [--log-file[=<path>]] [--window-mode=<windowed|borderless|exclusive>] [--resolution=<WIDTHxHEIGHT>] [--display=<N>] [--refresh-rate=<HZ>] [--scaling=<fit|cover|stretch|integer>] [--vsync=<on|off>] [--hdr=<auto|on|off>] [--debug-server[=host:port]] <path-to-eboot.bin>");
+        Log.Info("Usage: SharpEmu.CLI [--strict] [--trace-imports[=N]] [--cpu-engine=<native>] [--log-level=<level>] [--log-file[=<path>]] [--window-mode=<windowed|borderless|exclusive>] [--resolution=<WIDTHxHEIGHT>] [--display=<N>] [--refresh-rate=<HZ>] [--scaling=<fit|cover|stretch|integer>] [--vsync=<on|off>] [--hdr=<auto|on|off>] [--overlay=<on|off>] [--overlay-mode=<full|minimal|titlebar>] [--overlay-corner=<topleft|topright|bottomright|bottomleft>] [--debug-server[=host:port]] <path-to-eboot.bin>");
         Log.Info(@"Example: SharpEmu.CLI --cpu-engine=native --trace-imports=64 --log-level=debug --log-file ""E:\Games\...\eboot.bin""");
         Log.Info("Debug server: --debug-server starts a live debug listener (default 127.0.0.1:5714); connect with SharpEmu.DebugClient.");
     }
@@ -1070,6 +1069,9 @@ internal static partial class Program
         int? refreshRateOverride = null;
         bool? vsyncOverride = null;
         HostHdrMode? hdrModeOverride = null;
+        bool? overlayEnabledOverride = null;
+        PerformanceOverlayMode? overlayModeOverride = null;
+        PerformanceOverlayCorner? overlayCornerOverride = null;
         videoOptions = HostVideoOptions.Default;
         logFilePath = null;
         logLevel = SharpEmuLog.MinimumLevel;
@@ -1142,6 +1144,41 @@ internal static partial class Program
                     return false;
                 }
                 vsyncOverride = vsync;
+                continue;
+            }
+            if (TrySplitOption(argument, "--overlay", out var overlayText))
+            {
+                if (!TryParseSwitch(overlayText, out var overlayEnabled))
+                {
+                    ebootPath = string.Empty;
+                    runtimeOptions = default;
+                    return false;
+                }
+                overlayEnabledOverride = overlayEnabled;
+                continue;
+            }
+            if (TrySplitOption(argument, "--overlay-mode", out var overlayModeText))
+            {
+                if (!Enum.TryParse<PerformanceOverlayMode>(overlayModeText, true, out var overlayMode) ||
+                    !Enum.IsDefined(overlayMode))
+                {
+                    ebootPath = string.Empty;
+                    runtimeOptions = default;
+                    return false;
+                }
+                overlayModeOverride = overlayMode;
+                continue;
+            }
+            if (TrySplitOption(argument, "--overlay-corner", out var overlayCornerText))
+            {
+                if (!Enum.TryParse<PerformanceOverlayCorner>(overlayCornerText, true, out var overlayCorner) ||
+                    !Enum.IsDefined(overlayCorner))
+                {
+                    ebootPath = string.Empty;
+                    runtimeOptions = default;
+                    return false;
+                }
+                overlayCornerOverride = overlayCorner;
                 continue;
             }
             if (TrySplitOption(argument, "--hdr", out var hdrText))
@@ -1327,6 +1364,9 @@ internal static partial class Program
             RefreshRate = refreshRateOverride ?? configuredVideoOptions.RefreshRate,
             VSync = vsyncOverride ?? configuredVideoOptions.VSync,
             HdrMode = hdrModeOverride ?? configuredVideoOptions.HdrMode,
+            OverlayEnabled = overlayEnabledOverride ?? configuredVideoOptions.OverlayEnabled,
+            OverlayMode = overlayModeOverride ?? configuredVideoOptions.OverlayMode,
+            OverlayCorner = overlayCornerOverride ?? configuredVideoOptions.OverlayCorner,
         }).Normalize();
         return true;
     }
@@ -1364,6 +1404,11 @@ internal static partial class Program
                 RefreshRate = effective.RefreshRate,
                 VSync = effective.VSync,
                 HdrMode = hdrMode,
+                OverlayEnabled = effective.OverlayEnabled,
+                OverlayCorner = Enum.TryParse<PerformanceOverlayCorner>(effective.OverlayCorner, true, out var corner)
+                    ? corner : defaults.OverlayCorner,
+                OverlayMode = Enum.TryParse<PerformanceOverlayMode>(effective.OverlayMode, true, out var mode)
+                    ? mode : defaults.OverlayMode,
             }.Normalize();
         }
         catch (Exception exception)

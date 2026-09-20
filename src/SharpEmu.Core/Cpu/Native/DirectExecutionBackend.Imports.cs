@@ -72,43 +72,7 @@ public sealed partial class DirectExecutionBackend
 
 	private unsafe static int RawVectoredHandlerManaged(void* exceptionInfo)
 	{
-		if (TryHandleGuestImageWriteFault(exceptionInfo))
-		{
-			return -1;
-		}
-
 		return TryRecoverUnresolvedSentinel(exceptionInfo);
-	}
-
-	/// <summary>
-	/// Windows counterpart of the POSIX SIGSEGV bridge into
-	/// <see cref="SharpEmu.HLE.GuestImageWriteTracker"/>. Guest code runs natively,
-	/// so a store into a surface the GPU backend has cached is an ordinary CPU
-	/// write with nothing to intercept — the page is write-protected instead and
-	/// the resulting fault is what tells the backend to re-upload. Without this
-	/// the cache serves the first upload forever, and anything the guest CPU
-	/// draws (a software-decoded movie frame, a memset fog layer) never reaches
-	/// the screen.
-	/// </summary>
-	private unsafe static bool TryHandleGuestImageWriteFault(void* exceptionInfo)
-	{
-		if (!SharpEmu.HLE.GuestImageWriteTracker.Enabled)
-		{
-			return false;
-		}
-
-		var exceptionRecord = ((EXCEPTION_POINTERS*)exceptionInfo)->ExceptionRecord;
-		// STATUS_ACCESS_VIOLATION, and only the write flavour: ExceptionInformation
-		// is [accessKind, address] with 0=read, 1=write, 8=DEP execute.
-		if (exceptionRecord->ExceptionCode != 3221225477u ||
-			exceptionRecord->NumberParameters < 2 ||
-			exceptionRecord->ExceptionInformation[0] != 1uL)
-		{
-			return false;
-		}
-
-		return SharpEmu.HLE.GuestImageWriteTracker.TryHandleWriteFault(
-			exceptionRecord->ExceptionInformation[1]);
 	}
 
 	private unsafe static int RawUnhandledFilterManaged(void* exceptionInfo)
@@ -200,6 +164,7 @@ public sealed partial class DirectExecutionBackend
 			return 18446744071562199042uL;
 		}
 		ImportStubEntry importStubEntry = _importEntries[importIndex];
+		using var registerPacketImport = SharpEmu.Libs.Diagnostics.AgcRegisterPacketProfile.MeasureImport(importStubEntry.Nid);
 		if (_perfHleHistogram)
 		{
 			RecordPerfHleCall(importStubEntry.Export?.Name ?? importStubEntry.Nid);
@@ -1623,9 +1588,6 @@ public sealed partial class DirectExecutionBackend
 			"LtTouSCZjHM" or // sceAgcCbNop
 			"k3GhuSNmBLU" or // sceAgcCbDispatch
 			"UZbQjYAwwXM" or // sceAgcCbSetShRegistersDirect
-			"pFLArOT53+w" or // sceAgcDcbSetShRegisterDirect
-			"QhPDD513V0w" or // sceAgcDcbSetShRegisterDirectGetSize
-			"43WJ08sSugE" or // sceAgcDcbWaitOnAddressGetSize
 			"JrtiDtKeS38" or // sceAgcAcbResetQueue
 			"cFazmnXpJOE" or // sceAgcAcbEventWrite
 			"KT-hTp-Ch14" or // sceAgcAcbAcquireMem
@@ -1883,7 +1845,7 @@ public sealed partial class DirectExecutionBackend
 		return elapsedTicks >= (long)(_importLoopGuardSeconds * Stopwatch.Frequency);
 	}
 
-	internal static bool IsImportLoopGuardBoundary(string nid) =>
+	private static bool IsImportLoopGuardBoundary(string nid) =>
 		nid is
 			"1jfXLRVzisc" or // sceKernelUsleep
 			"WKAXJ4XBPQ4" or // scePthreadCondWait
@@ -1891,9 +1853,10 @@ public sealed partial class DirectExecutionBackend
 			"Op8TBGY5KHg" or // pthread_cond_wait
 			"27bAgiJmOh0" or // pthread_cond_timedwait
 			"n88vx3C5nW8" or // gettimeofday
-			"-2IRUCO--PM" or // clock_gettime
-			"0V5nU-Z6t4U" or // sceKernelGetProcessTime
-			"aI6lQW5v57k";   // sceKernelGetProcessTimeCounter
+			"lLMT9vJAck0" or // clock_gettime
+			"-2IRUCO--PM" or // sceKernelReadTsc
+			"4J2sUJmuHZQ" or // sceKernelGetProcessTime
+			"fgxnMeTNUtY";   // sceKernelGetProcessTimeCounter
 
 	private void ResetImportLoopPattern()
 	{
@@ -2292,17 +2255,18 @@ public sealed partial class DirectExecutionBackend
 		{
 			return false;
 		}
-		if (_runtimeSymbolsByName.TryGetValue(symbolName, out var value) && IsRuntimeSymbolAddressUsable(value))
+		var runtimeSymbolsByName = Volatile.Read(ref _runtimeSymbolsByName);
+		if (runtimeSymbolsByName.TryGetValue(symbolName, out var value) && IsRuntimeSymbolAddressUsable(value))
 		{
 			address = value;
 			return true;
 		}
-		if (symbolName.StartsWith("_", StringComparison.Ordinal) && _runtimeSymbolsByName.TryGetValue(symbolName[1..], out value) && IsRuntimeSymbolAddressUsable(value))
+		if (symbolName.StartsWith("_", StringComparison.Ordinal) && runtimeSymbolsByName.TryGetValue(symbolName[1..], out value) && IsRuntimeSymbolAddressUsable(value))
 		{
 			address = value;
 			return true;
 		}
-		if (_runtimeSymbolsByName.TryGetValue("_" + symbolName, out value) && IsRuntimeSymbolAddressUsable(value))
+		if (runtimeSymbolsByName.TryGetValue("_" + symbolName, out value) && IsRuntimeSymbolAddressUsable(value))
 		{
 			address = value;
 			return true;
