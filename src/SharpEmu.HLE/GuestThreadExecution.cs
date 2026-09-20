@@ -62,6 +62,14 @@ public interface IGuestThreadScheduler
     int WakeBlockedThreads(string wakeKey, int maxCount = int.MaxValue);
 
     /// <summary>
+    /// Reports whether the current guest thread has an exception that waits for an import safe point.
+    /// </summary>
+    bool HasPendingGuestExceptionForCurrentThread();
+
+    // Host waits must allow exception delivery before the import call returns.
+    void DeliverPendingGuestExceptionIfReady(CpuContext context) { }
+
+    /// <summary>
     /// Applies a new guest scheduling priority to a live thread, mapping it
     /// onto the host thread if one is running. Returns false when the thread
     /// handle is unknown.
@@ -92,6 +100,19 @@ public interface IGuestThreadScheduler
         ulong arg0,
         ulong arg1,
         ulong arg2,
+        ulong stackAddress,
+        ulong stackSize,
+        string reason,
+        out ulong returnValue,
+        out string? error);
+
+    bool TryCallGuestFunction(
+        CpuContext callerContext,
+        ulong entryPoint,
+        ulong arg0,
+        ulong arg1,
+        ulong arg2,
+        ulong arg3,
         ulong stackAddress,
         ulong stackSize,
         string reason,
@@ -248,10 +269,13 @@ public static class GuestThreadExecution
 
     public static ulong CurrentGuestThreadHandle => _currentGuestThreadHandle;
 
+    public static bool HasPendingCurrentThreadBlock => _pendingBlockReason is not null;
+
     public static ulong CurrentFiberAddress => _currentFiberAddress;
 
     public static ulong EnterGuestThread(ulong threadHandle)
     {
+        GpuMemory.GpuMemoryAccessProfile.InitializeCurrentThread();
         var previous = _currentGuestThreadHandle;
         _currentGuestThreadHandle = threadHandle;
         _pendingBlockReason = null;

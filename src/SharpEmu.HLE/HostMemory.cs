@@ -82,6 +82,8 @@ public static unsafe class HostMemory
             return Win32VirtualQuery(address, out info, (nuint)sizeof(BasicInfo));
         }
 
+        if (Host.Posix.PosixViewRegions.TryQuery((ulong)address, out info))
+            return (nuint)sizeof(BasicInfo);
         return Posix.Query(address, out info);
     }
 
@@ -128,7 +130,6 @@ public static unsafe class HostMemory
         private const int PROT_EXEC = 0x4;
 
         private const int MAP_PRIVATE = 0x02;
-        private const int MAP_FIXED = 0x10;
         private static readonly int MAP_ANON = OperatingSystem.IsMacOS() ? 0x1000 : 0x20;
         private static readonly int MAP_NORESERVE = OperatingSystem.IsMacOS() ? 0 : 0x4000;
 

@@ -8,6 +8,7 @@ namespace SharpEmu.GUI;
 
 public sealed class PerGameSettings
 {
+
     private static readonly JsonSerializerOptions SerializerOptions = new()
     {
         WriteIndented = true,
@@ -35,6 +36,10 @@ public sealed class PerGameSettings
 
     public string? HdrMode { get; set; }
 
+    public bool? OverlayEnabled { get; set; }
+    public string? OverlayCorner { get; set; }
+    public string? OverlayMode { get; set; }
+
     public List<string>? EnvironmentToggles { get; set; }
 
     public List<string>? CustomEnvironmentVariables { get; set; }
@@ -52,6 +57,9 @@ public sealed class PerGameSettings
         ScalingMode is null &&
         VSync is null &&
         HdrMode is null &&
+        OverlayEnabled is null &&
+        OverlayCorner is null &&
+        OverlayMode is null &&
         EnvironmentToggles is null &&
         CustomEnvironmentVariables is null;
 
@@ -162,6 +170,21 @@ public sealed class PerGameSettings
             HdrMode = null;
         }
 
+        if (OverlayEnabled == global.OverlayEnabled)
+        {
+            OverlayEnabled = null;
+        }
+
+        if (string.Equals(OverlayCorner, global.OverlayCorner, StringComparison.OrdinalIgnoreCase))
+        {
+            OverlayCorner = null;
+        }
+
+        if (string.Equals(OverlayMode, global.OverlayMode, StringComparison.OrdinalIgnoreCase))
+        {
+            OverlayMode = null;
+        }
+
         if (EnvironmentToggles is { } environmentToggles &&
             EnvironmentEntriesEqual(environmentToggles, global.EnvironmentToggles))
         {
@@ -217,9 +240,12 @@ public sealed class PerGameSettings
     private static HashSet<string> NormalizeEnvironmentEntries(IEnumerable<string> entries)
     {
         var normalized = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        if (StrictComputeSettings.IsEnabled(entries)) normalized.Add(StrictComputeSettings.VariableName);
         foreach (var entry in entries)
         {
             var parts = entry.Split('=', 2, StringSplitOptions.TrimEntries);
+            // An explicit zero differs from the enabled default for this switch.
+            if (string.Equals(parts[0], StrictComputeSettings.VariableName, StringComparison.OrdinalIgnoreCase)) continue;
             if (parts.Length == 0 || string.IsNullOrWhiteSpace(parts[0]))
             {
                 continue;
@@ -251,6 +277,9 @@ public sealed record EffectiveLaunchSettings(
     string ScalingMode,
     bool VSync,
     string HdrMode,
+    bool OverlayEnabled,
+    string OverlayCorner,
+    string OverlayMode,
     IReadOnlyList<string> EnvironmentToggles)
 {
     public static EffectiveLaunchSettings Resolve(GuiSettings global, PerGameSettings? perGame) => new(
@@ -265,5 +294,8 @@ public sealed record EffectiveLaunchSettings(
         perGame?.ScalingMode ?? global.ScalingMode,
         perGame?.VSync ?? global.VSync,
         perGame?.HdrMode ?? global.HdrMode,
+        perGame?.OverlayEnabled ?? global.OverlayEnabled,
+        perGame?.OverlayCorner ?? global.OverlayCorner,
+        perGame?.OverlayMode ?? global.OverlayMode,
         perGame?.EnvironmentToggles ?? global.EnvironmentToggles);
 }

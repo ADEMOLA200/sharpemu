@@ -102,6 +102,32 @@ public static partial class Gen5MslTranslator
                         Temp("uint", ShuffleLane(value, lane)));
                     return true;
                 }
+                case "VMovrelsB32":
+                {
+                    if (instruction.Control is not null ||
+                        instruction.Destinations.Count == 0 ||
+                        instruction.Destinations[0].Kind != Gen5OperandKind.VectorRegister ||
+                        instruction.Sources.Count < 2 ||
+                        instruction.Sources[0].Kind != Gen5OperandKind.VectorRegister ||
+                        instruction.Sources[1].Kind != Gen5OperandKind.ScalarRegister)
+                    {
+                        error = "VMovrelsB32 expects an unmodified VGPR source and M0";
+                        return false;
+                    }
+
+                    var baseRegister = instruction.Sources[0].Value;
+                    var relativeRegister = Temp(
+                        "uint",
+                        $"{baseRegister}u + ({RawSource(instruction, 1)})");
+                    var selectedRegister = Temp(
+                        "uint",
+                        $"{relativeRegister} < {VectorRegisterFileCount}u ? " +
+                        $"{relativeRegister} : {baseRegister}u");
+                    StoreVector(
+                        instruction.Destinations[0].Value,
+                        $"v[{selectedRegister}]");
+                    return true;
+                }
                 case "VWritelaneB32":
                 {
                     // vdst[lane(src1)] = src0; a writelane lands regardless of EXEC.
@@ -223,6 +249,11 @@ public static partial class Gen5MslTranslator
                     EmitCvtPkU8F32(instruction),
                 "VCvtPkrtzF16F32" =>
                     EmitCvtPkrtzF16F32(instruction),
+                "VCvtPkU16U32" =>
+                    $"(min({RawSource(instruction, 0)}, 65535u) | (min({RawSource(instruction, 1)}, 65535u) << 16u))",
+                "VCvtPkI16I32" =>
+                    $"((as_type<uint>(clamp(as_type<int>({RawSource(instruction, 0)}), -32768, 32767)) & 0xFFFFu) | " +
+                    $"(as_type<uint>(clamp(as_type<int>({RawSource(instruction, 1)}), -32768, 32767)) << 16u))",
                 "VCvtPknormI16F32" =>
                     $"pack_float_to_snorm2x16(float2({F(instruction, 0)}, {F(instruction, 1)}))",
                 "VCvtPknormU16F32" =>
@@ -235,6 +266,8 @@ public static partial class Gen5MslTranslator
                     $"(({RawSource(instruction, 0)}) - ({RawSource(instruction, 1)}))",
                 "VSubrevU32" or "VSubrevI32" =>
                     $"(({RawSource(instruction, 1)}) - ({RawSource(instruction, 0)}))",
+                "VMulI32I24" =>
+                    EmitSignedMultiply24(instruction),
                 // The SPIR-V translator treats the U24 multiply as a full 32-bit
                 // multiply (only the Hi/Mad forms mask); mirror it exactly.
                 "VMulLoU32" or "VMulLoI32" or "VMulU32U24" =>
@@ -251,6 +284,10 @@ public static partial class Gen5MslTranslator
                     $"(((({RawSource(instruction, 0)}) & 0xFFFFu) * (({RawSource(instruction, 1)}) & 0xFFFFu)) + ({RawSource(instruction, 2)}))",
                 "VAdd3U32" =>
                     $"(({RawSource(instruction, 0)}) + ({RawSource(instruction, 1)}) + ({RawSource(instruction, 2)}))",
+                "VXadU32" =>
+                    $"((({RawSource(instruction, 0)}) ^ ({RawSource(instruction, 1)})) + ({RawSource(instruction, 2)}))",
+                "VSadU32" =>
+                    $"((max({RawSource(instruction, 0)}, {RawSource(instruction, 1)}) - min({RawSource(instruction, 0)}, {RawSource(instruction, 1)})) + ({RawSource(instruction, 2)}))",
                 "VAddLshlU32" =>
                     $"((({RawSource(instruction, 0)}) + ({RawSource(instruction, 1)})) << (({RawSource(instruction, 2)}) & 31u))",
                 "VLshlAddU32" =>
@@ -278,6 +315,7 @@ public static partial class Gen5MslTranslator
                 "VAndB32" => $"(({RawSource(instruction, 0)}) & ({RawSource(instruction, 1)}))",
                 "VOrB32" => $"(({RawSource(instruction, 0)}) | ({RawSource(instruction, 1)}))",
                 "VXorB32" => $"(({RawSource(instruction, 0)}) ^ ({RawSource(instruction, 1)}))",
+                "VXor3B32" => $"(({RawSource(instruction, 0)}) ^ ({RawSource(instruction, 1)}) ^ ({RawSource(instruction, 2)}))",
                 "VXnorB32" => $"~(({RawSource(instruction, 0)}) ^ ({RawSource(instruction, 1)}))",
                 "VNotB32" => $"~({RawSource(instruction, 0)})",
                 "VAndOrB32" =>
@@ -415,6 +453,14 @@ public static partial class Gen5MslTranslator
 
             StoreVector(destination, result);
             return true;
+        }
+
+        private string EmitSignedMultiply24(Gen5ShaderInstruction instruction)
+        {
+            var signedLeft = $"(as_type<int>(({RawSource(instruction, 0)}) << 8u) >> 8)";
+            var signedRight = $"(as_type<int>(({RawSource(instruction, 1)}) << 8u) >> 8)";
+            // Unsigned multiplication preserves the low result bits on overflow.
+            return $"({AsUInt(signedLeft)} * {AsUInt(signedRight)})";
         }
 
         private string EmitCvtPkU8F32(Gen5ShaderInstruction instruction)
@@ -997,11 +1043,33 @@ public static partial class Gen5MslTranslator
 
             if (instruction.Opcode == "SGetpcB64")
             {
-                var pc = _state.Program.Address +
-                    instruction.Pc +
-                    (ulong)(instruction.Words.Count * sizeof(uint));
-                StoreScalar(destination, FormatUInt((uint)pc));
-                StoreScalar(destination + 1, FormatUInt((uint)(pc >> 32)));
+                {
+                    // The shader base is pushed per draw; the program offset is added to it.
+                    var (baseLow, baseHigh) = ShaderBaseWords();
+                    var offset = instruction.Pc + (ulong)(instruction.Words.Count * sizeof(uint));
+                    var address = Temp("ulong", $"((ulong){baseLow} | ((ulong){baseHigh} << 32)) + {offset}ul");
+                    StoreScalar(destination, $"(uint){address}");
+                    StoreScalar(destination + 1, $"(uint)({address} >> 32)");
+                    return true;
+                }
+            }
+
+            if (instruction.Opcode == "SBcnt1I32B64")
+            {
+                var wide = Temp("ulong", RawSource64(instruction, 0));
+                var bitCountResult = Temp("uint", $"(uint)popcount({wide})");
+                StoreScalar(destination, bitCountResult);
+                Line($"scc = {bitCountResult} != 0u;");
+                return true;
+            }
+
+            if (instruction.Opcode == "SFF1I32B64")
+            {
+                var wide = Temp("ulong", RawSource64(instruction, 0));
+                var result = Temp(
+                    "uint",
+                    $"{wide} == 0ul ? 0xFFFFFFFFu : (uint)ctz({wide})");
+                StoreScalar(destination, result);
                 return true;
             }
 
@@ -1059,6 +1127,24 @@ public static partial class Gen5MslTranslator
                     Line($"scc = {result} != 0u;");
                     return true;
                 }
+                case "SAbsI32":
+                {
+                    var sign = Temp("uint", $"0u - ({left} >> 31u)");
+                    var result = Temp("uint", $"({left} ^ {sign}) - {sign}");
+                    StoreScalar(destination, result);
+                    Line($"scc = {result} != 0u;");
+                    return true;
+                }
+                case "SWqmB32":
+                {
+                    var quadAny = Temp(
+                        "uint",
+                        $"({left} | ({left} >> 1) | ({left} >> 2) | ({left} >> 3)) & 0x11111111u");
+                    var result = Temp("uint", $"{quadAny} * 0xFu");
+                    StoreScalar(destination, result);
+                    Line($"scc = {result} != 0u;");
+                    return true;
+                }
                 case "SBrevB32":
                 {
                     var result = Temp("uint", $"reverse_bits({left})");
@@ -1079,9 +1165,13 @@ public static partial class Gen5MslTranslator
                         "uint",
                         $"{left} == 0u ? 0xFFFFFFFFu : (uint)ctz({left})");
                     StoreScalar(destination, result);
-                    Line($"scc = {result} != 0u;");
                     return true;
                 }
+                case "SBitset0B32":
+                    StoreScalar(
+                        destination,
+                        $"{ScalarExpression(destination)} & ~(1u << ({left} & 31u))");
+                    return true;
                 case "SBitset1B32":
                     StoreScalar(
                         destination,
@@ -1278,6 +1368,15 @@ public static partial class Gen5MslTranslator
             {
                 error = "missing scalar compare source";
                 return false;
+            }
+
+            if (instruction.Opcode is "SCmpEqU64" or "SCmpLgU64")
+            {
+                var wideLeft = Temp("ulong", RawSource64(instruction, 0));
+                var wideRight = Temp("ulong", RawSource64(instruction, 1));
+                var comparison = instruction.Opcode == "SCmpEqU64" ? "==" : "!=";
+                Line($"scc = {wideLeft} {comparison} {wideRight};");
+                return true;
             }
 
             var left = Temp("uint", RawSource(instruction, 0));

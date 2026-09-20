@@ -57,13 +57,6 @@ public partial class MainWindow : Window
         LocalizedChoice.FromKey("Error", "Options.LogLevel.Error"),
         LocalizedChoice.FromKey("Critical", "Options.LogLevel.Critical"),
     ];
-    private readonly LocalizedChoice[] _renderResolutionChoices =
-    [
-        LocalizedChoice.FromKey("1.0", "Options.RenderResolution.Native"),
-        LocalizedChoice.Literal("0.75", "75%"),
-        LocalizedChoice.Literal("0.5", "50%"),
-        LocalizedChoice.Literal("0.25", "25%"),
-    ];
     private readonly LocalizedChoice[] _windowModeChoices =
     [
         LocalizedChoice.FromKey("Windowed", "Options.WindowMode.Windowed"),
@@ -76,6 +69,19 @@ public partial class MainWindow : Window
         LocalizedChoice.FromKey("Cover", "Options.Scaling.Cover"),
         LocalizedChoice.FromKey("Stretch", "Options.Scaling.Stretch"),
         LocalizedChoice.FromKey("Integer", "Options.Scaling.Integer"),
+    ];
+    private readonly LocalizedChoice[] _overlayModeChoices =
+    [
+        LocalizedChoice.FromKey("Full", "Options.OverlayMode.Full"),
+        LocalizedChoice.FromKey("Minimal", "Options.OverlayMode.Minimal"),
+        LocalizedChoice.FromKey("TitleBar", "Options.OverlayMode.TitleBar"),
+    ];
+    private readonly LocalizedChoice[] _overlayCornerChoices =
+    [
+        LocalizedChoice.FromKey("TopLeft", "Options.OverlayCorner.TopLeft"),
+        LocalizedChoice.FromKey("TopRight", "Options.OverlayCorner.TopRight"),
+        LocalizedChoice.FromKey("BottomRight", "Options.OverlayCorner.BottomRight"),
+        LocalizedChoice.FromKey("BottomLeft", "Options.OverlayCorner.BottomLeft"),
     ];
     private readonly LocalizedChoice[] _hdrModeChoices =
     [
@@ -97,6 +103,7 @@ public partial class MainWindow : Window
     private readonly List<LogLine> _allConsoleLines = new();
     private readonly ConcurrentQueue<(string Line, bool IsError)> _pendingLines = new();
     private readonly DispatcherTimer _consoleFlushTimer;
+    private readonly DispatcherTimer _libraryLayoutTimer;
 
     private GuiSettings _settings = new();
     private IReadOnlyList<HostDisplayOption> _hostDisplays = [];
@@ -131,6 +138,8 @@ public partial class MainWindow : Window
     private bool _addFolderInProgress;
     private bool _isLibraryGridLayout;
     private GameEntry? _lastSelectedGame;
+    private double _libraryRailRowHeight = 188;
+    private double _libraryGridRowHeight = 216;
 
     // Bundled key art shown whenever no game-specific backdrop applies; the
     // plain window color remains the fallback when the asset fails to load.
@@ -188,6 +197,15 @@ public partial class MainWindow : Window
             MaybeAutoScroll();
         };
         _consoleFlushTimer.Start();
+        _libraryLayoutTimer = new DispatcherTimer
+        {
+            Interval = TimeSpan.FromMilliseconds(120),
+        };
+        _libraryLayoutTimer.Tick += (_, _) =>
+        {
+            _libraryLayoutTimer.Stop();
+            UpdateLibraryLayoutMetrics();
+        };
 
         TitleBar.PointerPressed += OnTitleBarPointerPressed;
         TitleBar.DoubleTapped += OnTitleBarDoubleTapped;
@@ -230,9 +248,10 @@ public partial class MainWindow : Window
         LibraryTabButton.Click += (_, _) => SetActivePage(0);
         OptionsTabButton.Click += (_, _) => SetActivePage(1);
         LibraryLayoutButton.Click += (_, _) => ToggleLibraryLayout();
-        LibraryPage.SizeChanged += (_, _) => UpdateLibraryGridHeight();
-        LibrarySelectedDetails.SizeChanged += (_, _) => UpdateLibraryGridHeight();
-        ConsoleToggle.IsCheckedChanged += (_, _) => ConsolePanel.IsVisible = ConsoleToggle.IsChecked == true && _consoleWindow is null;
+        LibraryPage.SizeChanged += (_, _) => ScheduleLibraryLayoutMetricsUpdate();
+        LibrarySelectedDetails.SizeChanged += (_, _) => UpdateLibraryMinimumHeight();
+        MainContent.SizeChanged += (_, _) => ClampEmbeddedConsoleHeight();
+        ConsoleToggle.IsCheckedChanged += (_, _) => UpdateEmbeddedConsoleVisibility();
         WireOptionsNavigation();
         WireGameOptions();
 
@@ -240,18 +259,6 @@ public partial class MainWindow : Window
         // it is open already uses the new values.
         LogLevelBox.SelectionChanged += (_, _) => _settings.LogLevel = SelectedLogLevel();
         TraceImportsBox.ValueChanged += (_, _) => _settings.ImportTraceLimit = (int)(TraceImportsBox.Value ?? 0);
-        RenderResolutionBox.SelectionChanged += (_, _) =>
-        {
-            if (RenderResolutionBox.SelectedItem is LocalizedChoice { Value: var value } &&
-                double.TryParse(
-                    value,
-                    System.Globalization.NumberStyles.Float,
-                    System.Globalization.CultureInfo.InvariantCulture,
-                    out var scale))
-            {
-                _settings.RenderResolutionScale = scale;
-            }
-        };
         StrictToggle.IsCheckedChanged += (_, _) => _settings.StrictDynlibResolution = StrictToggle.IsChecked == true;
         LogToFileToggle.IsCheckedChanged += (_, _) => _settings.LogToFile = LogToFileToggle.IsChecked == true;
         OverrideLogFileToggle.IsCheckedChanged += (_, _) =>
@@ -275,8 +282,17 @@ public partial class MainWindow : Window
         ScalingModeBox.SelectionChanged += (_, _) => _settings.ScalingMode = SelectedComboText(ScalingModeBox, "Fit");
         VSyncToggle.IsCheckedChanged += (_, _) => _settings.VSync = VSyncToggle.IsChecked == true;
         HdrModeBox.SelectionChanged += (_, _) => _settings.HdrMode = SelectedComboText(HdrModeBox, "Auto");
+        OverlayEnabledToggle.IsCheckedChanged += (_, _) => _settings.OverlayEnabled = OverlayEnabledToggle.IsChecked == true;
+        OverlayModeBox.SelectionChanged += (_, _) => _settings.OverlayMode = SelectedComboText(OverlayModeBox, "Full");
+        OverlayCornerBox.SelectionChanged += (_, _) => _settings.OverlayCorner = SelectedComboText(OverlayCornerBox, "TopRight");
         UpdateButton.Click += async (_, _) => await OnUpdateButtonAsync();
         SelectLogFilePathButton.Click += async (_, _) => await SelectLogFilePathAsync();
+        PerformanceProfileToggle.IsCheckedChanged += (_, _) =>
+            SetEnvironmentToggle("SHARPEMU_PROFILE_PERFORMANCE", PerformanceProfileToggle.IsChecked == true);
+        PerformanceFrameTraceToggle.IsCheckedChanged += (_, _) =>
+            SetEnvironmentToggle("SHARPEMU_PROFILE_PERFORMANCE_FRAME_TRACE", PerformanceFrameTraceToggle.IsChecked == true);
+        StrictComputeToggle.IsCheckedChanged += (_, _) =>
+            StrictComputeSettings.SetEnabled(_settings.EnvironmentToggles, StrictComputeToggle.IsChecked == true);
         EnvBthidToggle.IsCheckedChanged += (_, _) =>
             SetEnvironmentToggle("SHARPEMU_BTHID_UNAVAILABLE", EnvBthidToggle.IsChecked == true);
         EnvLoopGuardToggle.IsCheckedChanged += (_, _) =>
@@ -295,14 +311,8 @@ public partial class MainWindow : Window
             SetEnvironmentToggle("SHARPEMU_LOG_IO", EnvLogIoToggle.IsChecked == true);
         EnvLogNpToggle.IsCheckedChanged += (_, _) =>
             SetEnvironmentToggle("SHARPEMU_LOG_NP", EnvLogNpToggle.IsChecked == true);
-        EnvGuestImageCpuSyncToggle.IsCheckedChanged += (_, _) =>
-            SetEnvironmentToggle(
-                "SHARPEMU_GUEST_IMAGE_CPU_SYNC",
-                EnvGuestImageCpuSyncToggle.IsChecked == true);
-        EnvForceSubmitOrphanPreamblesToggle.IsCheckedChanged += (_, _) =>
-            SetEnvironmentToggle(
-                "SHARPEMU_FORCE_SUBMIT_ORPHAN_PREAMBLES",
-                EnvForceSubmitOrphanPreamblesToggle.IsChecked == true);
+        CrashDumpToggle.IsCheckedChanged += (_, _) =>
+            SetEnvironmentToggle("SHARPEMU_CRASH_CAPTURE", CrashDumpToggle.IsChecked == true);
         DefaultProfileBox.TextChanged += (_, _) =>
             _settings.DefaultProfile = GuiSettings.NormalizeDefaultProfile(DefaultProfileBox.Text);
         LanguageBox.SelectionChanged += (_, _) => OnLanguageChanged();
@@ -426,6 +436,7 @@ public partial class MainWindow : Window
         LibraryToolbar.IsVisible = index == 0;
         OptionsPageSurface.IsVisible = index == 1;
         OptionsPage.IsVisible = index == 1;
+        UpdateEmbeddedConsoleVisibility();
 
         if (index == 1)
         {
@@ -440,13 +451,8 @@ public partial class MainWindow : Window
         _isLibraryGridLayout = grid;
         SetClass(GameList, "gridLayout", grid);
         SetClass(LibrarySelectedDetails, "gridLayout", grid);
-        LibraryPage.RowDefinitions[0].Height = grid
-            ? GridLength.Auto
-            : new GridLength(188);
-        LibraryPage.Margin = grid
-            ? new Thickness(0, 6, 0, 0)
-            : new Thickness(0, 46, 0, 0);
-        UpdateLibraryGridHeight();
+        LibraryPage.Margin = new Thickness(0, 6, 0, 0);
+        UpdateLibraryLayoutMetrics();
         UpdateLibraryLayoutButton();
 
         if (GameList.SelectedItem is { } selected)
@@ -457,18 +463,37 @@ public partial class MainWindow : Window
         }
     }
 
-    private void UpdateLibraryGridHeight()
+    private void UpdateLibraryLayoutMetrics()
     {
-        var pageHeight = LibraryPage.Bounds.Height;
-        if (!_isLibraryGridLayout || pageHeight <= 0)
-        {
-            GameList.MaxHeight = double.PositiveInfinity;
-            return;
-        }
+        var metrics = LibraryLayoutMetrics.Calculate(LibraryPage.Bounds.Width);
+        Resources["LibraryCoverSize"] = metrics.CoverSize;
+        Resources["LibraryTileWidth"] = metrics.ItemWidth;
+        Resources["LibraryRailItemHeight"] = metrics.RailItemHeight;
+        Resources["LibraryGridItemHeight"] = metrics.GridItemHeight;
+        _libraryRailRowHeight = metrics.RailItemHeight + 16;
+        _libraryGridRowHeight = metrics.GridItemHeight + 16;
 
-        GameList.MaxHeight = Math.Max(
-            0,
-            pageHeight - LibrarySelectedDetails.DesiredSize.Height);
+        GameList.MaxHeight = double.PositiveInfinity;
+        UpdateLibraryMinimumHeight();
+    }
+
+    private void ScheduleLibraryLayoutMetricsUpdate()
+    {
+        _libraryLayoutTimer.Stop();
+        _libraryLayoutTimer.Start();
+    }
+
+    private void UpdateLibraryMinimumHeight()
+    {
+        var detailsHeight = LibrarySelectedDetails.IsVisible
+            ? LibrarySelectedDetails.DesiredSize.Height
+            : 0;
+        var cardRowHeight = _isLibraryGridLayout
+            ? _libraryGridRowHeight
+            : _libraryRailRowHeight;
+        MainContent.RowDefinitions[1].MinHeight =
+            LibraryPage.Margin.Top + detailsHeight + cardRowHeight;
+        ClampEmbeddedConsoleHeight();
     }
 
     private void ToggleLibraryLayout()
@@ -1059,12 +1084,14 @@ public partial class MainWindow : Window
         Interlocked.Increment(ref _libraryScanGeneration);
         Interlocked.Increment(ref _detailLoadGeneration);
         _consoleFlushTimer.Stop();
+        _libraryLayoutTimer.Stop();
         _gamepadTimer.Stop();
     }
 
     private void CompleteWindowClosing()
     {
         RunShutdownStep("library watcher", _libraryWatcher.Dispose);
+        RememberEmbeddedConsoleHeight();
         RunShutdownStep("settings", _settings.Save);
         RunShutdownStep("SDL gamepad", SdlLauncherGamepad.Shutdown);
         RunShutdownStep("title music", _sndPreview.Stop);
@@ -1072,6 +1099,7 @@ public partial class MainWindow : Window
         RunShutdownStep("console window", () => _consoleWindow?.Close());
         RunShutdownStep("emulator process", () => _emulator?.Dispose());
         RunShutdownStep("console mirror", () => _consoleMirror?.Dispose());
+        RunShutdownStep("pending console output", FlushAllPendingConsoleLines);
         RunShutdownStep("file log", DropFileLog);
     }
 
@@ -1169,22 +1197,24 @@ public partial class MainWindow : Window
     {
         CpuEngineBox.ItemsSource = _cpuEngineChoices;
         LogLevelBox.ItemsSource = _logLevelChoices;
-        RenderResolutionBox.ItemsSource = _renderResolutionChoices;
         WindowModeBox.ItemsSource = _windowModeChoices;
         ScalingModeBox.ItemsSource = _scalingModeChoices;
         HdrModeBox.ItemsSource = _hdrModeChoices;
         BinkPlaybackBox.ItemsSource = _binkPlaybackChoices;
+        OverlayModeBox.ItemsSource = _overlayModeChoices;
+        OverlayCornerBox.ItemsSource = _overlayCornerChoices;
     }
 
     private void RefreshLocalizedChoices()
     {
         RefreshChoices(_cpuEngineChoices);
         RefreshChoices(_logLevelChoices);
-        RefreshChoices(_renderResolutionChoices);
         RefreshChoices(_windowModeChoices);
         RefreshChoices(_scalingModeChoices);
         RefreshChoices(_hdrModeChoices);
         RefreshChoices(_binkPlaybackChoices);
+        RefreshChoices(_overlayModeChoices);
+        RefreshChoices(_overlayCornerChoices);
     }
 
     private static void RefreshChoices(IEnumerable<LocalizedChoice> choices)
@@ -1209,20 +1239,17 @@ public partial class MainWindow : Window
             _ => 2,
         };
         TraceImportsBox.Value = Math.Clamp(_settings.ImportTraceLimit, 0, 4096);
-        RenderResolutionBox.SelectedIndex = _settings.RenderResolutionScale switch
-        {
-            >= 0.875 => 0,
-            >= 0.625 => 1,
-            >= 0.375 => 2,
-            _ => 3,
-        };
         StrictToggle.IsChecked = _settings.StrictDynlibResolution;
         LogToFileToggle.IsChecked = _settings.LogToFile;
+        CrashDumpToggle.IsChecked = _settings.EnvironmentToggles.Contains("SHARPEMU_CRASH_CAPTURE");
         OverrideLogFileToggle.IsChecked = _settings.OverrideLogFile;
         TitleMusicToggle.IsChecked = _settings.PlayTitleMusic;
         SetLibraryLayout(string.Equals(_settings.LibraryLayout, "Grid", StringComparison.OrdinalIgnoreCase));
         DiscordToggle.IsChecked = _settings.DiscordRichPresence;
         AutoUpdateToggle.IsChecked = _settings.CheckForUpdatesOnStartup;
+        PerformanceProfileToggle.IsChecked = _settings.EnvironmentToggles.Contains("SHARPEMU_PROFILE_PERFORMANCE");
+        PerformanceFrameTraceToggle.IsChecked = _settings.EnvironmentToggles.Contains("SHARPEMU_PROFILE_PERFORMANCE_FRAME_TRACE");
+        StrictComputeToggle.IsChecked = StrictComputeSettings.IsEnabled(_settings.EnvironmentToggles);
         EnvBthidToggle.IsChecked = _settings.EnvironmentToggles.Contains("SHARPEMU_BTHID_UNAVAILABLE");
         EnvLoopGuardToggle.IsChecked = _settings.EnvironmentToggles.Contains("SHARPEMU_DISABLE_IMPORT_LOOP_GUARD");
         EnvWritableApp0Toggle.IsChecked = _settings.EnvironmentToggles.Contains("SHARPEMU_WRITABLE_APP0");
@@ -1232,10 +1259,6 @@ public partial class MainWindow : Window
         EnvLogDirectMemoryToggle.IsChecked = _settings.EnvironmentToggles.Contains("SHARPEMU_LOG_DIRECT_MEMORY");
         EnvLogIoToggle.IsChecked = _settings.EnvironmentToggles.Contains("SHARPEMU_LOG_IO");
         EnvLogNpToggle.IsChecked = _settings.EnvironmentToggles.Contains("SHARPEMU_LOG_NP");
-        EnvGuestImageCpuSyncToggle.IsChecked =
-            _settings.EnvironmentToggles.Contains("SHARPEMU_GUEST_IMAGE_CPU_SYNC");
-        EnvForceSubmitOrphanPreamblesToggle.IsChecked =
-            _settings.EnvironmentToggles.Contains("SHARPEMU_FORCE_SUBMIT_ORPHAN_PREAMBLES");
         EnvRenderDocToggle.IsChecked =
             _settings.EnvironmentToggles.Contains("SHARPEMU_RENDERDOC");
         DefaultProfileBox.Text = _settings.DefaultProfile;
@@ -1244,6 +1267,9 @@ public partial class MainWindow : Window
         ScalingModeBox.SelectedIndex = ChoiceIndex(_settings.ScalingMode, "Fit", "Cover", "Stretch", "Integer");
         VSyncToggle.IsChecked = _settings.VSync;
         HdrModeBox.SelectedIndex = ChoiceIndex(_settings.HdrMode, "Auto", "On", "Off");
+        OverlayEnabledToggle.IsChecked = _settings.OverlayEnabled;
+        OverlayModeBox.SelectedIndex = ChoiceIndex(_settings.OverlayMode, "Full", "Minimal", "TitleBar");
+        OverlayCornerBox.SelectedIndex = ChoiceIndex(_settings.OverlayCorner, "TopLeft", "TopRight", "BottomRight", "BottomLeft");
         UpdateLogFilePathText();
     }
 
@@ -2140,10 +2166,7 @@ public partial class MainWindow : Window
 
         GameLibraryReconciler.ReconcileVisibleGames(_visibleGames, desired);
 
-        var selectedAfter = selectedPath is null
-            ? null
-            : _visibleGames.FirstOrDefault(game =>
-                game.Path.Equals(selectedPath, GameLibraryPath.Comparison));
+        var selectedAfter = ResolveLibrarySelection(_visibleGames, selectedPath);
         if (!ReferenceEquals(GameList.SelectedItem, selectedAfter))
         {
             GameList.SelectedItem = selectedAfter;
@@ -2164,6 +2187,17 @@ public partial class MainWindow : Window
                 _ = UpdateBackdropAsync(selectedAfter);
             }
         }
+    }
+
+    internal static GameEntry? ResolveLibrarySelection(
+        IReadOnlyList<GameEntry> visibleGames,
+        string? selectedPath)
+    {
+        var selected = selectedPath is null
+            ? null
+            : visibleGames.FirstOrDefault(game =>
+                game.Path.Equals(selectedPath, GameLibraryPath.Comparison));
+        return selected ?? visibleGames.FirstOrDefault();
     }
 
     /// <summary>
@@ -2204,6 +2238,7 @@ public partial class MainWindow : Window
             _sndPreview.Stop();
         }
 
+        UpdateLibraryMinimumHeight();
         UpdateRunButtons();
     }
 
@@ -2439,6 +2474,10 @@ public partial class MainWindow : Window
         Environment.SetEnvironmentVariable(
             DefaultProfileEnvironmentName,
             GuiSettings.NormalizeDefaultProfile(_settings.DefaultProfile));
+        // Apply both values so an inherited skip setting cannot override the GUI choice.
+        Environment.SetEnvironmentVariable(StrictComputeSettings.VariableName,
+            StrictComputeSettings.GetLaunchValue(effective.EnvironmentToggles));
+        _appliedEnvironmentVariables.Add(StrictComputeSettings.VariableName);
         _appliedEnvironmentVariables.Add(DefaultProfileEnvironmentName);
 
         Environment.SetEnvironmentVariable(
@@ -2539,7 +2578,7 @@ public partial class MainWindow : Window
         _runningGameName = null;
         _runningGameTitleId = null;
         UpdateDiscordPresence();
-        ConsolePanel.IsVisible = ConsoleToggle.IsChecked == true && _consoleWindow is null;
+        UpdateEmbeddedConsoleVisibility();
         Console.Error.WriteLine("[GUI][INFO] Waiting for the SDL game process to exit.");
     }
 
@@ -2577,12 +2616,13 @@ public partial class MainWindow : Window
     private void OnEmulatorExited(int exitCode)
     {
         FlushPendingConsoleLines();
+        FlushAllPendingConsoleLines();
         _isRunning = false;
         _isStopping = false;
         _emulator?.Dispose();
         _emulator = null;
         _pendingLaunch = null;
-        ConsolePanel.IsVisible = ConsoleToggle.IsChecked == true && _consoleWindow is null;
+        UpdateEmbeddedConsoleVisibility();
 
         var meaningKey = exitCode switch
         {
@@ -2675,6 +2715,9 @@ public partial class MainWindow : Window
         arguments.Add($"--scaling={launch.Settings.ScalingMode.ToLowerInvariant()}");
         arguments.Add($"--vsync={(launch.Settings.VSync ? "on" : "off")}");
         arguments.Add($"--hdr={launch.Settings.HdrMode.ToLowerInvariant()}");
+        arguments.Add($"--overlay={(launch.Settings.OverlayEnabled ? "on" : "off")}");
+        arguments.Add($"--overlay-mode={launch.Settings.OverlayMode.ToLowerInvariant()}");
+        arguments.Add($"--overlay-corner={launch.Settings.OverlayCorner.ToLowerInvariant()}");
 
         arguments.Add(launch.EbootPath);
         return arguments;
@@ -2774,12 +2817,8 @@ public partial class MainWindow : Window
         }
 
         var incoming = new List<LogLine>();
-        while (incoming.Count < MaxConsoleLinesPerFlush &&
-               _pendingLines.TryDequeue(out var pending))
-        {
-            WriteFileLog(pending.Line);
-            incoming.Add(new LogLine(pending.Line, BrushForLine(pending.Line)));
-        }
+        DrainPendingLogLines(_pendingLines, WriteFileLog,
+            line => incoming.Add(new LogLine(line, BrushForLine(line))), MaxConsoleLinesPerFlush);
 
         FlushFileLog();
 
@@ -2860,6 +2899,27 @@ public partial class MainWindow : Window
 
     // ---- Console-to-file mirroring ----
 
+    private void FlushAllPendingConsoleLines()
+    {
+        while (!_pendingLines.IsEmpty)
+        {
+            FlushPendingConsoleLines();
+        }
+    }
+
+    internal static void DrainPendingLogLines(
+        ConcurrentQueue<(string Line, bool IsError)> pendingLines,
+        Action<string> writeLine,
+        Action<string> displayLine,
+        int maxLines = int.MaxValue)
+    {
+        for (var count = 0; count < maxLines && pendingLines.TryDequeue(out var pending); count++)
+        {
+            writeLine(pending.Line);
+            displayLine(pending.Line);
+        }
+    }
+
     private void WriteFileLog(string text)
     {
         if (_fileLog is not { } writer)
@@ -2920,7 +2980,7 @@ public partial class MainWindow : Window
         {
             if (ReferenceEquals(_fileLog, writer))
             {
-                FlushPendingConsoleLines();
+                FlushAllPendingConsoleLines();
                 DropFileLog();
             }
         }, TimeSpan.FromMilliseconds(400));
@@ -2980,6 +3040,68 @@ public partial class MainWindow : Window
         await Clipboard.SetTextAsync(text);
     }
 
+    private void UpdateEmbeddedConsoleVisibility()
+    {
+        var visible = ShouldShowEmbeddedConsole(
+            ConsoleToggle.IsChecked == true, _consoleWindow is not null, _activePageIndex, _isGameSettingsOpen);
+        if (visible == ConsolePanel.IsVisible)
+        {
+            return;
+        }
+
+        if (!visible)
+            RememberEmbeddedConsoleHeight();
+
+        ConsolePanel.IsVisible = visible;
+        ConsoleSplitter.IsVisible = visible;
+        MainContent.RowDefinitions[2].Height = visible
+            ? new GridLength(8)
+            : new GridLength(0);
+        MainContent.RowDefinitions[3].MinHeight = visible ? 120 : 0;
+        MainContent.RowDefinitions[3].Height = visible
+            ? new GridLength(Math.Min(_settings.EmbeddedConsoleHeight, MaximumEmbeddedConsoleHeight()))
+            : new GridLength(0);
+    }
+
+    internal static bool ShouldShowEmbeddedConsole(
+        bool requested, bool detached, int activePageIndex, bool gameOptionsOpen) =>
+        requested && !detached && activePageIndex == 0 && !gameOptionsOpen;
+
+    private void RememberEmbeddedConsoleHeight()
+    {
+        if (ConsolePanel.IsVisible && ConsolePanel.Bounds.Height >= 120)
+            _settings.EmbeddedConsoleHeight = ConsolePanel.Bounds.Height;
+    }
+
+    private void ClampEmbeddedConsoleHeight()
+    {
+        if (!ConsolePanel.IsVisible)
+        {
+            return;
+        }
+
+        var maximumHeight = MaximumEmbeddedConsoleHeight();
+        if (MainContent.RowDefinitions[3].ActualHeight > maximumHeight)
+        {
+            MainContent.RowDefinitions[3].Height = new GridLength(maximumHeight);
+        }
+    }
+
+    private double MaximumEmbeddedConsoleHeight()
+    {
+        const double minimumConsoleHeight = 120;
+        const double splitterHeight = 8;
+        var toolbarHeight = ContentToolbar.Bounds.Height +
+            ContentToolbar.Margin.Top +
+            ContentToolbar.Margin.Bottom;
+        return Math.Max(
+            minimumConsoleHeight,
+            MainContent.Bounds.Height -
+            toolbarHeight -
+            MainContent.RowDefinitions[1].MinHeight -
+            splitterHeight);
+    }
+
     private void ShowConsoleWindow()
     {
         if (_consoleWindow is { } window)
@@ -2990,16 +3112,20 @@ public partial class MainWindow : Window
 
         ConsoleSearchBox.Text = string.Empty;
         ConsoleToggle.IsChecked = false;
-        ConsolePanel.IsVisible = false;
+        UpdateEmbeddedConsoleVisibility();
         _consoleWindow = new ConsoleWindow(
             _consoleLines,
             () => { _consoleLines.Clear(); _allConsoleLines.Clear(); },
-            AutoScrollCheck.IsChecked == true);
+            AutoScrollCheck.IsChecked == true,
+            _settings);
         _consoleWindow.Closed += (_, _) =>
         {
             _consoleWindow = null;
-            ConsoleToggle.IsChecked = true;
-            ConsolePanel.IsVisible = true;
+            if (!_isClosing)
+            {
+                ConsoleToggle.IsChecked = true;
+                UpdateEmbeddedConsoleVisibility();
+            }
         };
         _consoleWindow.Show(this);
     }
